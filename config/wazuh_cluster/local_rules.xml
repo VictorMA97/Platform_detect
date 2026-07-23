@@ -1,0 +1,44 @@
+<!-- Reglas locales TFM - Deteccion de tecnicas APT
+     Escenario 1: T1110 Brute Force
+     Escenario 2: T1136 Create Account
+     Escenario 3: T1098.004 SSH Authorized Keys -->
+<group name="local,tfm_apt_lab,">
+
+  <!-- ESCENARIO 1: fuerza bruta SSH.
+       if_sid 5763 es la regla que dispara realmente en este entorno
+       (5720 se incluye por compatibilidad con otras versiones del ruleset). -->
+  <rule id="100010" level="12">
+    <if_sid>5720,5763</if_sid>
+    <description>TFM-LAB: Multiples fallos SSH - posible fuerza bruta</description>
+    <mitre><id>T1110</id></mitre>
+    <group>tfm_scenario_1,authentication_failures,</group>
+  </rule>
+
+  <!-- ESCENARIO 2: creacion de cuenta local (FIM sobre ficheros de cuentas) -->
+  <rule id="100020" level="12">
+    <if_sid>550,554</if_sid>
+    <field name="file">/etc/passwd|/etc/group</field>
+    <description>TFM-LAB: Cambio en /etc/passwd o /etc/group - cuenta local no autorizada</description>
+    <mitre><id>T1136</id></mitre>
+    <group>tfm_scenario_2,persistence,</group>
+  </rule>
+
+  <!-- ESCENARIO 3a: insercion de clave SSH no autorizada -->
+  <rule id="100030" level="12">
+    <if_sid>550,554</if_sid>
+    <field name="file">.ssh/authorized_keys</field>
+    <description>TFM-LAB: Modificacion de authorized_keys - clave SSH no autorizada</description>
+    <mitre><id>T1098.004</id></mitre>
+    <group>tfm_scenario_3,persistence,defense_evasion,</group>
+  </rule>
+
+  <!-- ESCENARIO 3b: modificacion de sshd_config -->
+  <rule id="100031" level="12">
+    <if_sid>550,554</if_sid>
+    <field name="file">/etc/ssh/sshd_config</field>
+    <description>TFM-LAB: Modificacion de sshd_config</description>
+    <mitre><id>T1098.004</id></mitre>
+    <group>tfm_scenario_3,persistence,defense_evasion,</group>
+  </rule>
+
+</group>

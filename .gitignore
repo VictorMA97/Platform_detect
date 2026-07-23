@@ -1,0 +1,16 @@
+# Sensitive local artifacts and generated secrets
+config/wazuh_indexer_ssl_certs/
+evidence/
+
+# Common secret and certificate files
+*.pem
+*.crt
+*.key
+*.csr
+*.p12
+*.pfx
+*.pub
+
+# Local OS/editor noise
+.DS_Store
+Thumbs.db
