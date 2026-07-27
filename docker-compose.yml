@@ -1,35 +1,48 @@
 # Wazuh App Copyright (C) 2017, Wazuh Inc. (License GPLv2)
 services:
-  # Bootstrap de un solo uso: genera la CA y los certificados TLS.
-  # No participa en 'docker compose up -d' (profiles), solo en:
-  #   docker compose run --rm wazuh-certs-generator
+  # Bootstrap de certificados TLS, integrado en el ciclo de vida normal:
+  # 'docker compose up -d' basta tanto en el primer arranque como en los
+  # siguientes. La herramienta oficial no es idempotente (aborta si ya existen
+  # certificados), asi que el entrypoint comprueba antes de invocarla; si el
+  # volumen de certificados ya tiene contenido (p.ej. tras un 'down' sin '-v',
+  # que no lo limpia por ser un bind mount), se omite sin error.
   wazuh-certs-generator:
     image: wazuh/wazuh-certs-generator:0.0.4
     hostname: wazuh-certs-generator
-    profiles:
-      - bootstrap
     environment:
       - CERT_TOOL_VERSION=4.14
     volumes:
       - ./config/wazuh_indexer_ssl_certs/:/certificates/
       - ./config/certs.yml:/config/certs.yml
+    entrypoint:
+      - sh
+      - -c
+      - |
+        if [ -f /certificates/root-ca.pem ]; then
+          echo "Certificados ya existentes en ./config/wazuh_indexer_ssl_certs/; no se regeneran."
+        else
+          /entrypoint.sh
+        fi
 
   # Normaliza los permisos del volumen de certificados: el generador los deja
   # legibles solo por su propio UID, y los tres nodos Wazuh corren con UID
-  # distintos. Se ejecuta con:
-  #   docker compose run --rm wazuh-certs-permissions
+  # distintos. Idempotente (chmod), se ejecuta siempre tras el generador.
   wazuh-certs-permissions:
     image: alpine:3.20
-    profiles:
-      - bootstrap
+    depends_on:
+      wazuh-certs-generator:
+        condition: service_completed_successfully
     volumes:
       - ./config/wazuh_indexer_ssl_certs/:/certificates/
     entrypoint: ["sh", "-c", "chmod -R a+rX /certificates"]
 
   wazuh.manager:
-    image: wazuh/wazuh-manager:4.14.6
+    image: wazuh/wazuh-manager:${WAZUH_STACK_VERSION:?falta WAZUH_STACK_VERSION en .env}
     hostname: wazuh.manager
     restart: always
+    depends_on:
+      wazuh-certs-permissions:
+        condition: service_completed_successfully
     networks:
       - wazuh-network
     ulimits:
@@ -46,14 +59,14 @@ services:
       - "55000:55000"
     environment:
       - INDEXER_URL="https://wazuh.indexer:9200"
-      - INDEXER_USERNAME=admin
-      - INDEXER_PASSWORD=SecretPassword
+      - INDEXER_USERNAME=${INDEXER_USERNAME:?falta INDEXER_USERNAME en .env}
+      - INDEXER_PASSWORD=${INDEXER_PASSWORD:?falta INDEXER_PASSWORD en .env}
       - FILEBEAT_SSL_VERIFICATION_MODE=full
       - SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/root-ca.pem
       - SSL_CERTIFICATE=/etc/ssl/filebeat.pem
       - SSL_KEY=/etc/ssl/filebeat.key
-      - API_USERNAME=wazuh-wui
-      - API_PASSWORD=MyS3cr37P450r.*-
+      - API_USERNAME=${API_USERNAME:?falta API_USERNAME en .env}
+      - API_PASSWORD=${API_PASSWORD:?falta API_PASSWORD en .env}
     volumes:
       - wazuh_api_configuration:/var/ossec/api/configuration
       - wazuh_etc:/var/ossec/etc
@@ -73,9 +86,12 @@ services:
       - ./config/wazuh_cluster/local_rules.xml:/var/ossec/etc/rules/local_rules.xml
 
   wazuh.indexer:
-    image: wazuh/wazuh-indexer:4.14.6
+    image: wazuh/wazuh-indexer:${WAZUH_STACK_VERSION:?falta WAZUH_STACK_VERSION en .env}
     hostname: wazuh.indexer
     restart: always
+    depends_on:
+      wazuh-certs-permissions:
+        condition: service_completed_successfully
     networks:
       - wazuh-network
     ports:
@@ -100,21 +116,26 @@ services:
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
 
   wazuh.dashboard:
-    image: wazuh/wazuh-dashboard:4.14.6
+    image: wazuh/wazuh-dashboard:${WAZUH_STACK_VERSION:?falta WAZUH_STACK_VERSION en .env}
     hostname: wazuh.dashboard
     restart: always
+    depends_on:
+      wazuh-certs-permissions:
+        condition: service_completed_successfully
+      wazuh.indexer:
+        condition: service_started
     networks:
       - wazuh-network
     ports:
       - 443:5601
     environment:
-      - INDEXER_USERNAME=admin
-      - INDEXER_PASSWORD=SecretPassword
+      - INDEXER_USERNAME=${INDEXER_USERNAME:?falta INDEXER_USERNAME en .env}
+      - INDEXER_PASSWORD=${INDEXER_PASSWORD:?falta INDEXER_PASSWORD en .env}
       - WAZUH_API_URL=https://wazuh.manager
-      - DASHBOARD_USERNAME=kibanaserver
-      - DASHBOARD_PASSWORD=kibanaserver
-      - API_USERNAME=wazuh-wui
-      - API_PASSWORD=MyS3cr37P450r.*-
+      - DASHBOARD_USERNAME=${DASHBOARD_USERNAME:?falta DASHBOARD_USERNAME en .env}
+      - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:?falta DASHBOARD_PASSWORD en .env}
+      - API_USERNAME=${API_USERNAME:?falta API_USERNAME en .env}
+      - API_PASSWORD=${API_PASSWORD:?falta API_PASSWORD en .env}
     volumes:
       - ./config/wazuh_indexer_ssl_certs/wazuh.dashboard.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard.pem
       - ./config/wazuh_indexer_ssl_certs/wazuh.dashboard-key.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard-key.pem
@@ -123,8 +144,6 @@ services:
       - ./config/wazuh_dashboard/wazuh.yml:/usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml
       - wazuh-dashboard-config:/usr/share/wazuh-dashboard/data/wazuh/config
       - wazuh-dashboard-custom:/usr/share/wazuh-dashboard/plugins/wazuh/public/assets/custom
-    depends_on:
-      - wazuh.indexer
     links:
       - wazuh.indexer:wazuh.indexer
       - wazuh.manager:wazuh.manager
@@ -133,17 +152,20 @@ services:
     build:
       context: ./agent-target
       args:
-        WAZUH_VERSION: 4.14.6-1
+        WAZUH_VERSION: ${WAZUH_AGENT_PACKAGE_VERSION:?falta WAZUH_AGENT_PACKAGE_VERSION en .env}
     hostname: agent-poc-1
     restart: always
     environment:
+      # Nombre del servicio en esta misma red Docker: no es una credencial ni
+      # un dato variable entre entornos, se deja fijo (cambiarlo exigiria
+      # renombrar tambien el servicio wazuh.manager).
       WAZUH_MANAGER_SERVER: wazuh.manager
       WAZUH_REGISTRATION_SERVER: wazuh.manager
-      WAZUH_AGENT_GROUP: default
-      WAZUH_AGENT_NAME: agent-poc-1
-      LAB_USER: corpuser
-      LAB_PASSWORD: Lab-Ficticio-2026!
-      LAB_ALLOW_SUDO: "yes"
+      WAZUH_AGENT_GROUP: ${WAZUH_AGENT_GROUP:?falta WAZUH_AGENT_GROUP en .env}
+      WAZUH_AGENT_NAME: ${WAZUH_AGENT_NAME:?falta WAZUH_AGENT_NAME en .env}
+      LAB_USER: ${LAB_USER:?falta LAB_USER en .env}
+      LAB_PASSWORD: ${LAB_PASSWORD:?falta LAB_PASSWORD en .env}
+      LAB_ALLOW_SUDO: ${LAB_ALLOW_SUDO:?falta LAB_ALLOW_SUDO en .env}
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -169,6 +191,8 @@ services:
       - wazuh-network
     tty: true
     stdin_open: true
+    volumes:
+      - ./results:/opt/results
 
 networks:
   wazuh-network:
