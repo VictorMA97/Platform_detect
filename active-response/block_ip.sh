@@ -41,6 +41,27 @@ iptables -C INPUT -j "${CHAIN}" 2>/dev/null || iptables -I INPUT -j "${CHAIN}"
 
 case "${ACTION}" in
     add)
+        # Handshake requerido por execd para registrar esta respuesta en su lista
+        # de timeouts: sin el mensaje 'check_keys' y su confirmacion, el <timeout>
+        # configurado en ossec.conf nunca dispara el 'delete' de reversion.
+        # Ver active_responses.c (send_keys_and_check_message) en el codigo fuente
+        # oficial de Wazuh.
+        KEYS_MSG=$(jq -nc --arg ip "${SRCIP}" \
+            '{version:1,origin:{name:"block_ip.sh",module:"active-response"},command:"check_keys",parameters:{keys:[$ip]}}')
+        printf '%s\n' "${KEYS_MSG}"
+        # Si execd no implementa el handshake en esta ruta de invocacion, no nos
+        # quedamos colgados esperando una respuesta que nunca llega: tras 5s se
+        # continua igual que antes (fail-open, prioriza aplicar el bloqueo).
+        if read -r -t 5 RESPONSE_JSON; then
+            RESPONSE_CMD=$(echo "${RESPONSE_JSON}" | jq -r '.command // empty')
+            if [ "${RESPONSE_CMD}" = "abort" ]; then
+                log_ev "ABORTADO_EXECD" "execd rechazo el registro de ${SRCIP} (respuesta=${RESPONSE_JSON})"
+                exit 0
+            fi
+        else
+            log_ev "SIN_RESPUESTA_EXECD" "Sin respuesta al handshake check_keys en 5s; se continua sin registro de timeout"
+        fi
+
         if iptables -C "${CHAIN}" -s "${SRCIP}" -j DROP 2>/dev/null; then
             log_ev "YA_BLOQUEADA" "IP ${SRCIP} ya estaba bloqueada"
         elif iptables -I "${CHAIN}" -s "${SRCIP}" -j DROP; then

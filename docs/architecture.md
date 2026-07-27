@@ -194,7 +194,7 @@ Todas las respuestas son reversibles:
 
 | Respuesta | Mecanismo de reversión |
 |-----------|------------------------|
-| Bloqueo de IP | Automática. `<timeout>300</timeout>`; Wazuh invoca el script con `delete` |
+| Bloqueo de IP | Automática. `<timeout>300</timeout>`; Wazuh invoca el script con `delete` (verificado: 300,349 s). Manual como vía alternativa: `iptables -D WAZUH_AR -s <IP> -j DROP` |
 | Deshabilitación de cuenta | Manual y documentada en el propio registro: `usermod -U <usuario>` |
 | Restauración de fichero | Manual. La versión alterada se conserva íntegra en `./evidence/` |
 
@@ -202,6 +202,14 @@ Se optó por reversión automática por tiempo únicamente en el bloqueo de IP, 
 acción con mayor probabilidad de falso positivo y menor coste de reintento. Las otras dos
 requieren decisión humana explícita, ya que revertirlas de forma automática podría
 restablecer precisamente el mecanismo de persistencia del atacante.
+
+La reversión automática por temporizador exige que el propio script de Active Response
+implemente el protocolo de *stateful active response* de Wazuh: tras el `add`, debe enviar por
+stdout un mensaje de control `check_keys` con las claves a vigilar (la IP, en este caso) y leer
+la confirmación antes de actuar. Es ese intercambio, no el `<timeout>` en sí, lo que permite a
+`execd` programar el `delete` posterior. `block_ip.sh` no lo implementaba en la primera
+validación íntegra del laboratorio, lo que dejó bloqueos sin revertir; corregido el script
+(`docs/validation_plan.md` §7.5), la reversión automática quedó verificada.
 
 ### 3.7 Preservación de evidencia y ruptura de la realimentación
 
@@ -220,7 +228,10 @@ de cualquier automatización que modifique elementos supervisados.
 ### 3.8 Bootstrap de certificados separado del ciclo de vida
 
 La generación de certificados TLS se ejecuta como paso previo explícito
-(`docker compose run --rm`) y no como dependencia de arranque. Dos motivos lo imponen:
+(`docker compose run --rm`) y no como dependencia de arranque. `wazuh-certs-generator` y
+`wazuh-certs-permissions` están definidos en el mismo `docker-compose.yml` que el resto del
+laboratorio, bajo `profiles: [bootstrap]`, de modo que `docker compose up -d` no los levanta.
+Dos motivos imponen esta separación:
 
 - La herramienta oficial **no es idempotente**: aborta si detecta certificados de una
   ejecución anterior, de modo que cualquier reintento de arranque fallaría.

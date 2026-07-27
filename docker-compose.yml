@@ -1,5 +1,31 @@
 # Wazuh App Copyright (C) 2017, Wazuh Inc. (License GPLv2)
 services:
+  # Bootstrap de un solo uso: genera la CA y los certificados TLS.
+  # No participa en 'docker compose up -d' (profiles), solo en:
+  #   docker compose run --rm wazuh-certs-generator
+  wazuh-certs-generator:
+    image: wazuh/wazuh-certs-generator:0.0.4
+    hostname: wazuh-certs-generator
+    profiles:
+      - bootstrap
+    environment:
+      - CERT_TOOL_VERSION=4.14
+    volumes:
+      - ./config/wazuh_indexer_ssl_certs/:/certificates/
+      - ./config/certs.yml:/config/certs.yml
+
+  # Normaliza los permisos del volumen de certificados: el generador los deja
+  # legibles solo por su propio UID, y los tres nodos Wazuh corren con UID
+  # distintos. Se ejecuta con:
+  #   docker compose run --rm wazuh-certs-permissions
+  wazuh-certs-permissions:
+    image: alpine:3.20
+    profiles:
+      - bootstrap
+    volumes:
+      - ./config/wazuh_indexer_ssl_certs/:/certificates/
+    entrypoint: ["sh", "-c", "chmod -R a+rX /certificates"]
+
   wazuh.manager:
     image: wazuh/wazuh-manager:4.14.6
     hostname: wazuh.manager

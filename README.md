@@ -60,6 +60,11 @@ respuesta, un registro con marcas de tiempo y una evidencia recuperable desde el
 | `wazuh.agent` | build `./agent-target` | Servidor víctima: sshd, usuario de prueba, agente Wazuh, scripts de respuesta |
 | `attacker` | build `./attacker` | Máquina atacante con los tres scripts de simulación |
 | `wazuh-certs-generator` | `wazuh/wazuh-certs-generator` | Bootstrap de un solo uso: genera la CA y los certificados TLS |
+| `wazuh-certs-permissions` | `alpine:3.20` | Bootstrap de un solo uso: normaliza permisos del volumen de certificados |
+
+Los dos servicios de bootstrap están bajo el perfil `bootstrap` (`profiles: [bootstrap]`), por
+lo que `docker compose up -d` no los levanta: solo se ejecutan explícitamente con
+`docker compose run --rm <servicio>`.
 
 Todos los servicios comparten la red `wazuh-network`. El único puerto publicado al host es
 el del dashboard.
@@ -105,8 +110,15 @@ La generación de certificados es un **paso previo de un solo uso**, deliberadam
 del ciclo de vida habitual: la herramienta oficial de Wazuh no es idempotente y aborta si
 detecta certificados de una ejecución anterior.
 
+> `./config/wazuh_indexer_ssl_certs/` es un *bind mount*, no un volumen Docker con nombre:
+> `docker compose down -v` **no lo limpia**. Si ya existen certificados de una ejecución
+> previa, bórralos a mano antes de regenerarlos (paso 1 de abajo).
+
 ```bash
-# 1. Certificados TLS (solo la primera vez, o tras 'docker compose down -v')
+# 0. Solo si ya existen certificados de una ejecución anterior
+rm -rf config/wazuh_indexer_ssl_certs/*
+
+# 1. Certificados TLS (solo la primera vez, o tras el paso 0)
 docker compose run --rm wazuh-certs-generator
 
 # 2. Normalización de permisos sobre el volumen de certificados
@@ -120,7 +132,9 @@ docker compose ps
 ```
 
 Todos los servicios deben aparecer como `Up`. El indexer tarda entre 40 y 90 segundos en
-quedar operativo.
+quedar operativo. Estos cuatro pasos se han verificado íntegros desde cero (`down -v` +
+limpieza de certificados + redespliegue completo + los tres escenarios) el 2026-07-27; el
+detalle está en `docs/validation_plan.md`, apartado 9bis.
 
 ---
 
@@ -207,7 +221,7 @@ docker compose exec wazuh.manager \
 
 | Escenario | Script | Acción | Reversión |
 |-----------|--------|--------|-----------|
-| 1 | `block_ip.sh` | Bloqueo de la IP origen en la cadena `WAZUH_AR` de iptables | Automática a los 300 s (`<timeout>`) |
+| 1 | `block_ip.sh` | Bloqueo de la IP origen en la cadena `WAZUH_AR` de iptables | Automática a los 300 s (`<timeout>`), verificada (300,349 s medidos). Requiere que el script implemente el *handshake* `check_keys` con `execd` — ver `docs/validation_plan.md` §7.5. Manual: `iptables -D WAZUH_AR -s <IP> -j DROP` dentro de `wazuh.agent` |
 | 2 | `disable_suspicious_user.sh` | Bloqueo de la cuenta (`usermod -L` + shell `nologin`) | Manual: `usermod -U <usuario>` |
 | 3 | `preserve_and_restore_file.sh` | Preserva copia con hash SHA256 y restaura el baseline limpio | Manual: copia preservada en `./evidence/` |
 
@@ -305,8 +319,9 @@ parte del objetivo de reproducibilidad.
 |---------|-------|----------|
 | `The tool to create the certificates does not exist in any bucket` | El generador necesita salida a Internet | No incluir ese contenedor en redes `internal: true` |
 | `Invalid IP or DNS wazuh-indexer` | El validador rechaza nombres de una sola etiqueta | Nombrar los servicios con punto: `wazuh.indexer`, `wazuh.manager` |
-| `Directory wazuh-certificates already exists` | El generador no es idempotente | `docker compose down -v` y ejecutarlo con `run --rm` |
+| `Directory wazuh-certificates already exists` | El generador no es idempotente | `rm -rf config/wazuh_indexer_ssl_certs/*` — **no** basta con `docker compose down -v`, porque ese directorio es un *bind mount* y `down -v` solo elimina volúmenes con nombre |
 | `AccessDeniedException: .../certs` | Permisos del volumen de certificados | Contenedor `wazuh-certs-permissions` (`chmod -R a+rX`) |
+| `no such service: wazuh-certs-generator` | El README documentaba estos comandos antes de que los servicios existieran en `docker-compose.yml` | Añadidos como servicios `profiles: [bootstrap]` en el propio compose (detalle en `docs/validation_plan.md` §7.4) |
 | `OutOfMemoryError: direct buffer memory` | Heap JVM insuficiente | `OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g` en el compose |
 | `not a directory` al montar un `.yml` | Docker crea un directorio si el fichero de origen no existe | Borrar el directorio fantasma y crear el fichero real |
 | Cambios en `ossec.conf` sin efecto | El volumen `agent-etc` cachea la configuración anterior | `docker volume rm <proyecto>_agent-etc` y recrear |
