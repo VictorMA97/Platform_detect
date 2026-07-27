@@ -300,3 +300,20 @@ ficheros afectan exclusivamente a su sistema de ficheros.
 - **Contenedores frente a máquinas completas.** Algunos mecanismos de auditoría del núcleo,
   como `whodata` basado en `auditd`, no están plenamente disponibles en contenedores; el FIM
   opera en modo `realtime` mediante notificaciones del sistema de ficheros.
+
+---
+
+## 6. Notas operativas
+
+Problemas de entorno —no de diseño— que conviene conocer antes de tocar el compose o los
+volúmenes.
+
+| Síntoma | Causa | Solución |
+|---------|-------|----------|
+| `OutOfMemoryError: direct buffer memory` en `wazuh.indexer` | Heap JVM por defecto insuficiente para OpenSearch | Ya fijado en el compose: `OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g` |
+| `not a directory` al levantar el laboratorio | Docker crea un directorio si el fichero de origen de un bind mount no existe (p. ej. un `.yml` borrado por error) | Borrar el directorio fantasma y restaurar el fichero real desde git |
+| Cambios en `ossec.conf` sin efecto tras editarlo | El volumen con nombre `agent-etc` cachea la configuración de un arranque anterior | `docker volume rm <proyecto>_agent-etc` y recrear el contenedor |
+
+Los problemas de certificados (herramienta no idempotente, servicios de bootstrap ausentes,
+permisos) y sus soluciones están documentados como incidencias reales, con causa raíz y
+verificación, en `docs/validation_plan.md` §7.4 y §7.6.

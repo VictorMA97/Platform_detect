@@ -1,7 +1,7 @@
 # Plan de validación
 
-Procedimiento de verificación del laboratorio, métricas definidas, resultados obtenidos e
-incidencias detectadas durante la validación.
+Procedimiento de verificación del laboratorio, qué se espera de cada escenario, métricas
+definidas, resultados obtenidos e incidencias detectadas durante la validación.
 
 ---
 
@@ -27,7 +27,7 @@ Deben superarse todas antes de iniciar los casos de prueba.
 
 | # | Comprobación | Orden | Resultado esperado |
 |---|--------------|-------|--------------------|
-| P1 | Servicios activos | `docker compose ps` | Cinco servicios en estado `Up` |
+| P1 | Servicios activos | `docker compose ps` | Cinco servicios en estado `Up`; `wazuh-certs-generator` y `wazuh-certs-permissions` en `Exited (0)` |
 | P2 | Agente registrado | `docker compose exec wazuh.manager /var/ossec/bin/agent_control -l` | Agente en estado `Active` |
 | P3 | Procesos del manager | `docker compose exec wazuh.manager /var/ossec/bin/wazuh-control status` | Todos en ejecución |
 | P4 | Reglas locales cargadas | `docker compose exec wazuh.manager cat /var/ossec/etc/rules/local_rules.xml` | Reglas 100010–100031 presentes |
@@ -35,7 +35,10 @@ Deben superarse todas antes de iniciar los casos de prueba.
 | P6 | Dependencias del agente | `docker compose exec wazuh.agent sh -c "which jq iptables"` | Ambas utilidades presentes |
 | P7 | Configuración de Active Response | `docker compose exec wazuh.manager grep -c "block-ip-lab" /var/ossec/etc/ossec.conf` | Valor mayor que cero |
 | P8 | Línea base de cuentas | `docker compose exec wazuh.agent sh -c "cut -d: -f1 /etc/passwd \| sort > /var/ossec/evidence/passwd.baseline"` | Fichero generado |
-| P9 | Interfaz web accesible | Navegador sobre el puerto publicado | Autenticación correcta |
+| P9 | Interfaz web accesible | `https://localhost` (usuario `admin`) | Autenticación correcta |
+
+Para filtrar únicamente las alertas del laboratorio en **Threat Hunting** del dashboard, usa
+la consulta `rule.groups:tfm_apt_lab`.
 
 > **Verificación de identificadores del ruleset.** Antes de una demostración conviene
 > confirmar que las reglas base declaradas en `<if_sid>` siguen siendo las que dispara la
@@ -44,7 +47,66 @@ Deben superarse todas antes de iniciar los casos de prueba.
 
 ---
 
-## 3. Tabla de validación
+## 3. Qué se espera por escenario
+
+### 3.1 Alertas
+
+| Escenario | Regla local | Nivel | Se encadena a | Descripción |
+|-----------|-------------|-------|----------------|-------------|
+| 1 | `100010` | 12 | `5720`, `5763` | Múltiples fallos de autenticación SSH |
+| 2 | `100020` | 12 | `550`, `554` | Cambio en `/etc/passwd` o `/etc/group` |
+| 3 | `100030` | 12 | `550`, `554` | Modificación de `authorized_keys` |
+| 3b | `100031` | 12 | `550`, `554` | Modificación de `sshd_config` |
+
+Las reglas locales no reimplementan detección: reutilizan las reglas base del ruleset de
+Wazuh y añaden únicamente la correlación necesaria para identificar el escenario y disparar
+la respuesta adecuada.
+
+> La regla base que dispara la fuerza bruta en este entorno es la **5763**, no la 5720 que
+> aparece en buena parte de la documentación. Ambas se declaran en `<if_sid>` por
+> compatibilidad entre versiones del ruleset. Conviene verificar estos identificadores antes
+> de una demostración.
+
+Comprobación del recuento de alertas generadas:
+
+```bash
+docker compose exec wazuh.manager \
+  grep -o '"id":"1000[0-9][0-9]"' /var/ossec/logs/alerts/alerts.json | sort | uniq -c
+```
+
+### 3.2 Respuestas automáticas
+
+| Escenario | Script | Acción | Reversión |
+|-----------|--------|--------|-----------|
+| 1 | `block_ip.sh` | Bloqueo de la IP origen en la cadena `WAZUH_AR` de iptables | Automática a los 300 s (`<timeout>`), verificada (300,349 s medidos, §7.5). Manual: `iptables -D WAZUH_AR -s <IP> -j DROP` dentro de `wazuh.agent` |
+| 2 | `disable_suspicious_user.sh` | Bloqueo de la cuenta (`usermod -L` + shell `nologin`) | Manual: `usermod -U <usuario>` |
+| 3 | `preserve_and_restore_file.sh` | Preserva copia con hash SHA256 y restaura el baseline limpio | Manual: copia preservada en `./evidence/` |
+
+Salvaguardas comunes a los tres scripts:
+
+- **Whitelists** (`whitelist.conf`) de IPs y usuarios que nunca deben verse afectados,
+  incluidas las cuentas del sistema y la infraestructura del propio laboratorio.
+- **Registro con marcas de tiempo** de inicio y fin en cada ejecución.
+- **Nunca se destruye evidencia**: el fichero alterado se copia antes de cualquier
+  modificación, y los nombres incluyen milisegundos más un sufijo anticolisión.
+- **Corte de realimentación**: la restauración de un fichero monitorizado es a su vez una
+  modificación que el FIM detecta. El script compara con el baseline y, si coinciden,
+  registra `SIN_CAMBIOS` y no actúa, evitando un bucle de auto-disparo (§7.1).
+
+Tiempos de ejecución esperados (orden de magnitud, medidos en `evidence/active_response.log`):
+
+| Escenario | Script | Tiempo típico |
+|-----------|--------|----------------|
+| 1 | `block_ip.sh` | 40-50 ms |
+| 2 | `disable_suspicious_user.sh` | 60-90 ms |
+| 3 | `preserve_and_restore_file.sh` | 45-50 ms |
+
+El tiempo de ejecución de la respuesta es despreciable frente al tiempo de detección: el
+factor determinante del tiempo total no es la automatización, sino la latencia de
+correlación del SIEM —especialmente en el escenario 1, donde la regla debe acumular varios
+intentos antes de disparar.
+
+### 3.3 Tabla resumen de validación
 
 | Escenario | Técnica MITRE | Acción simulada | Alerta esperada | Respuesta automática | Evidencia | Resultado |
 |-----------|---------------|-----------------|-----------------|----------------------|-----------|-----------|
@@ -165,14 +227,51 @@ evidencia previa ha sido reemplazada.
 | **Impacto operativo** | Efecto de la respuesta sobre la disponibilidad del servicio | Análisis cualitativo por escenario |
 | **Reversibilidad** | Posibilidad de deshacer la acción y coste de hacerlo | Automática, manual documentada o no reversible |
 
+### Cómo consultar evidencias
+
+Todas las evidencias se escriben en `./evidence/` (host) y `./results/` (host), montados
+respectivamente en el agente como `/var/ossec/evidence` y en el atacante como
+`/opt/results`.
+
+```bash
+# Registro cronológico de todas las respuestas automáticas
+cat evidence/active_response.log
+
+# Ficheros preservados antes de su restauración
+ls -la evidence/
+
+# Registro de hashes SHA256 (integridad de la evidencia)
+cat evidence/hashes.txt
+
+# Verificación de un fichero preservado
+sha256sum evidence/2026*_home_corpuser_.ssh_authorized_keys
+
+# Marcas de tiempo del lado atacante
+cat results/timings.log
+
+# Log nativo de Active Response de Wazuh (no persistente entre redespliegues)
+docker compose exec wazuh.agent tail -20 /var/ossec/logs/active-responses.log
+```
+
+Comprobación del efecto real sobre el sistema:
+
+```bash
+docker compose exec wazuh.agent iptables -L WAZUH_AR -n     # IP bloqueada
+docker compose exec wazuh.agent passwd -S backdoor01        # 'L' = cuenta bloqueada
+docker compose exec wazuh.agent cat /home/corpuser/.ssh/authorized_keys  # restaurado
+```
+
 ### Método de cálculo
 
 Todos los registros emplean el formato ISO 8601 en UTC con precisión de milisegundos, lo que
-permite el cruce directo entre los tres orígenes:
+permite el cruce directo entre tres orígenes: el instante del ataque (`results/timings.log`),
+el instante de la alerta (campo `timestamp` de `alerts.json`) y los instantes de inicio/fin de
+la respuesta (`evidence/active_response.log`). De ese cruce se obtienen el tiempo de
+detección, el tiempo de ejecución de la respuesta y el tiempo total de respuesta.
 
 ```bash
 # Instante del ataque
-docker compose exec attacker cat /opt/results/timings.log
+cat results/timings.log
 
 # Instante de la alerta
 docker compose exec wazuh.manager grep '"id":"100010"' /var/ossec/logs/alerts/alerts.json \
@@ -184,11 +283,14 @@ cat evidence/active_response.log
 
 ---
 
-## 6. Resultados obtenidos
+## 6. Ejecuciones de referencia
 
-Ejecución de referencia realizada sobre Wazuh 4.14.6.
+### 6.1 Primera ejecución (2026-07-23)
 
-### Tiempos de ejecución de las respuestas
+Ejecución de referencia realizada sobre Wazuh 4.14.6, antes de las correcciones descritas en
+la sección 7.
+
+**Tiempos de ejecución de las respuestas**
 
 | Escenario | Script | Inicio | Fin | Duración |
 |-----------|--------|--------|-----|----------|
@@ -197,12 +299,7 @@ Ejecución de referencia realizada sobre Wazuh 4.14.6.
 | 2 (segunda invocación) | `disable_suspicious_user.sh` | 19:57:54.417 | 19:57:54.483 | **66 ms** |
 | 3 | `preserve_and_restore_file.sh` | 19:56:33.623 | 19:56:33.668 | **45 ms** |
 
-El tiempo de ejecución de la respuesta resulta despreciable frente al tiempo de detección.
-El factor determinante del tiempo total no es la automatización, sino la latencia de
-correlación del SIEM —especialmente en el escenario 1, donde la regla debe acumular varios
-intentos antes de disparar.
-
-### Verificación del efecto sobre el sistema
+**Verificación del efecto sobre el sistema**
 
 | Escenario | Comprobación | Resultado |
 |-----------|--------------|-----------|
@@ -211,14 +308,54 @@ intentos antes de disparar.
 | 3 | Fichero preservado y resumen | SHA-256 `f33a6f9c61c2fc5d47a1c5b0ef0e49409c00e5f8a861dd59831438d996b2c009` |
 | 3 | Contenido de `authorized_keys` | Restaurado al estado de referencia |
 
-### Valoración por métrica
+**Valoración por métrica**
 
 | Métrica | Escenario 1 | Escenario 2 | Escenario 3 |
 |---------|-------------|-------------|-------------|
 | Ejecución correcta | Sí | Sí | Sí |
-| Falsos positivos | Uno detectado (ver §7.3) | No observados | No observados |
+| Falsos positivos | Uno detectado (§7.3) | No observados | No observados |
 | Impacto operativo | Medio — pérdida de conectividad del origen durante 300 s | Alto — la cuenta queda inutilizable hasta intervención | Bajo — solo se altera el fichero comprometido |
-| Reversibilidad | Automática (300 s) | Manual: `usermod -U` | Manual: copia preservada |
+| Reversibilidad | Automática (300 s) — no verificada aún en esta ejecución | Manual: `usermod -U` | Manual: copia preservada |
+
+### 6.2 Segunda ejecución — reproducibilidad íntegra (2026-07-27)
+
+Verificación de C7: `docker compose down -v`, seguido de un despliegue completo desde cero y
+la ejecución de los tres escenarios principales, sin ninguna intervención manual dentro de
+contenedores más allá de los comandos ya documentados en el README.
+
+```bash
+docker compose down -v
+rm -rf config/wazuh_indexer_ssl_certs/*        # bind mount; down -v no lo limpia (§7.4)
+docker compose run --rm wazuh-certs-generator
+docker compose run --rm wazuh-certs-permissions
+docker compose up -d
+```
+
+**Resultado.** Los cinco servicios alcanzaron el estado `Up` sin reintentos. El agente quedó
+`Active` en el manager en menos de un minuto. Las comprobaciones P1-P9 se superaron todas.
+Los tres escenarios (CP-01, CP-03, CP-04) generaron su alerta y ejecutaron su respuesta
+correctamente sobre el despliegue limpio:
+
+| Caso | Alerta | Respuesta | Efecto verificado |
+|------|--------|-----------|--------------------|
+| CP-01 | `100010` (17:58:46.418) | `block_ip.sh` OK (17:58:46.961 → 17:58:47.009, 48 ms) | IP `172.19.0.2` bloqueada en `WAZUH_AR`; la propia fuerza bruta quedó cortada a mitad de ejecución (intentos 9-10 con `Connection timed out`) |
+| CP-03 | `100020` ×2 | `disable_suspicious_user.sh` OK (dos invocaciones, 127 ms y 79 ms) | `passwd -S backdoor01` → `L` |
+| CP-04 | `100030` ×2 | `preserve_and_restore_file.sh`: `PRESERVADO` → `RESTAURADO` → `SIN_CAMBIOS` | Fichero preservado con hash registrado; `authorized_keys` restaurado al baseline |
+
+Antes de esta ejecución, la prueba de reproducibilidad íntegra era la pendiente más
+relevante del laboratorio. Quedó superada, con dos incidencias de artefacto corregidas
+durante la propia prueba (§7.4) y una incidencia funcional real detectada y corregida
+(§7.5): CP-02 (reversión automática de CP-01) falló en esta primera pasada porque
+`block_ip.sh` no implementaba el *handshake* `check_keys` que `execd` exige para programar el
+`delete`. Corregido el script y repetido CP-01 sobre el mismo despliegue, la reversión se
+disparó a los 300,349 s, dentro del margen del `<timeout>300</timeout>` configurado.
+
+Una revisión posterior (§7.6, mismo día) corrigió además cuatro desviaciones estructurales
+entre el repositorio y los requisitos originales de la prueba de concepto (arranque en un
+solo comando, persistencia de `results/`, fichero `.env`, limpieza de dependencias sin usar
+en el atacante). El redeploy final, repetido tras esas correcciones (`down -v` + `up -d
+--build` + CP-01/CP-03/CP-04), reprodujo los mismos resultados: alerta, respuesta y evidencia
+correctas en los tres escenarios, y `results/timings.log` persistiendo en el host.
 
 ---
 
@@ -240,7 +377,8 @@ coincide, el evento se clasifica como auto-inducido y no se actúa. Adicionalmen
 nombres de evidencia incorporan milisegundos y un sufijo anticolisión.
 
 **Verificación posterior.** Secuencia `PRESERVADO` → `RESTAURADO` → `SIN_CAMBIOS`, con la
-evidencia real conservada.
+evidencia real conservada. Reproducida de forma consistente en más de una decena de
+ejecuciones posteriores, sin ningún caso de `RESTAURADO` sin su `SIN_CAMBIOS` correspondiente.
 
 **Generalización.** Toda automatización que modifique un elemento supervisado puede activar
 su propio detonante. Es un riesgo estructural, no una particularidad de este laboratorio.
@@ -273,7 +411,7 @@ internos y accesos remotos legítimos.
 
 ### 7.4 Pasos de despliegue documentados que no existían como artefacto ejecutable
 
-**Observación.** El README instruye ejecutar `docker compose run --rm wazuh-certs-generator`
+**Observación.** El README instruía ejecutar `docker compose run --rm wazuh-certs-generator`
 y `docker compose run --rm wazuh-certs-permissions` como paso 1 del despliegue. Al intentar
 una reproducción íntegra desde cero, ninguno de los dos servicios estaba definido en
 `docker-compose.yml`: el generador existía como fichero suelto (`generate-indexer-certs.yml`)
@@ -282,21 +420,21 @@ existía en ningún fichero. El primer comando documentado fallaba con `no such 
 
 **Causa.** El fichero de certificados se desarrolló y probó por separado (`docker compose -f
 generate-indexer-certs.yml run --rm generator`) y el ajuste de permisos se aplicó a mano en
-su momento; ninguno de los dos pasos se trasladó al `docker-compose.yml` que el README da por
-válido, ni quedó registrado como comando reproducible.
+su momento; ninguno de los dos pasos se trasladó al `docker-compose.yml` que el README daba
+por válido, ni quedó registrado como comando reproducible.
 
-**Corrección aplicada.** Se incorporaron ambos servicios a `docker-compose.yml` con los
-nombres exactos que ya usaba el README, bajo `profiles: [bootstrap]` para que no se levanten
-con `docker compose up -d`. Se eliminó `generate-indexer-certs.yml` por quedar duplicado. El
-servicio de permisos usa una imagen `alpine` mínima y un único `chmod -R a+rX`.
+**Corrección aplicada (primera fase).** Se incorporaron ambos servicios a
+`docker-compose.yml` con los nombres exactos que ya usaba el README, bajo `profiles:
+[bootstrap]` para que no se levantaran con `docker compose up -d`. Se eliminó
+`generate-indexer-certs.yml` por quedar duplicado. El servicio de permisos usa una imagen
+`alpine` mínima y un único `chmod -R a+rX`. (Esta solución quedó posteriormente sustituida
+por una más completa: ver §7.6, punto 1.)
 
-**Segundo hallazgo relacionado.** El propio README describe la limpieza previa a una nueva
+**Segundo hallazgo relacionado.** El propio README describía la limpieza previa a una nueva
 generación de certificados como `docker compose down -v`. Es incorrecto: el volumen de
 certificados es un *bind mount* (`./config/wazuh_indexer_ssl_certs/`), no un volumen Docker
 con nombre, por lo que `down -v` no lo elimina. Repetir el generador sin borrar antes ese
-directorio falla, porque la herramienta oficial no es idempotente (ya documentado en la
-tabla de fricción del README, pero sin la orden de limpieza correspondiente). Se añade
-`rm -rf config/wazuh_indexer_ssl_certs/*` como paso explícito antes de regenerar.
+directorio falla, porque la herramienta oficial no es idempotente.
 
 **Generalización.** Un paso de despliegue probado manualmente una vez y después descrito solo
 en prosa dejó de ser reproducible en cuanto se intentó repetir sin la persona que lo ejecutó
@@ -358,11 +496,11 @@ hay ningún error que registrar: simplemente nadie programó el recordatorio. Cu
 temporizador que se añada al laboratorio en el futuro (o se adapte de este) debe replicar este
 handshake, no solo el manejo de `add`/`delete`.
 
-### 7.6 Desviaciones estructurales pendientes de la revisión inicial, corregidas el 2026-07-27
+### 7.6 Desviaciones estructurales respecto a los requisitos originales
 
-Tras cerrar C7, una revisión posterior identificó cuatro desviaciones entre el repositorio y
-los requisitos originales de la prueba de concepto que la ejecución de §9bis no cubría por
-seguir siendo, en ese momento, técnicamente correctas aunque incómodas:
+Tras cerrar C7 (§6.2), una revisión posterior identificó cuatro desviaciones entre el
+repositorio y los requisitos originales de la prueba de concepto que la ejecución de §6.2 no
+cubría por seguir siendo, en ese momento, técnicamente correctas aunque incómodas.
 
 1. **`docker compose up -d` no bastaba por sí solo.** Corregido en §7.4 solo a medias: los
    servicios `wazuh-certs-generator`/`wazuh-certs-permissions` ya existían, pero seguían bajo
@@ -416,10 +554,6 @@ documentado.
 | CP-06 (integridad ante repetición) | Verificado tras la corrección de §7.1, no como caso formal |
 | Medición formal del tiempo de detección | Los tiempos de ejecución están medidos; el cruce con las marcas de tiempo de las alertas está pendiente de una ejecución completa |
 
-CP-02 y la prueba de reproducibilidad íntegra, que figuraban aquí como pendientes, se
-ejecutaron el 2026-07-27 (§7.4-7.5, §9bis). CP-02 falló en su primera ejecución por un defecto
-real en `block_ip.sh` (§7.5); corregido el defecto, se repitió y quedó **superada**.
-
 ---
 
 ## 9. Criterios de aceptación global
@@ -432,41 +566,4 @@ real en `block_ip.sh` (§7.5); corregido el defecto, se repitió y quedó **supe
 | C4 | Toda respuesta genera evidencia accesible desde el anfitrión | Cumplido |
 | C5 | Toda respuesta es reversible | Cumplido. La reversión automática de escenario 1 falló en la primera prueba, se diagnosticó (§7.5) y quedó verificada tras corregir `block_ip.sh` |
 | C6 | Ninguna acción automática afecta al sistema anfitrión | Cumplido |
-| C7 | El entorno se despliega sin intervención manual sobre contenedores | **Cumplido — verificado el 2026-07-27, ver §9bis** |
-
----
-
-## 9bis. Ejecución de referencia — prueba de reproducibilidad íntegra (2026-07-27)
-
-Verificación de C7: `docker compose down -v`, seguido de un despliegue completo desde cero y
-la ejecución de los tres escenarios principales, sin ninguna intervención manual dentro de
-contenedores más allá de los comandos ya documentados en el README.
-
-```bash
-docker compose down -v
-rm -rf config/wazuh_indexer_ssl_certs/*        # bind mount; down -v no lo limpia (§7.4)
-docker compose run --rm wazuh-certs-generator
-docker compose run --rm wazuh-certs-permissions
-docker compose up -d
-```
-
-**Resultado.** Los cinco servicios alcanzaron el estado `Up` sin reintentos. El agente quedó
-`Active` en el manager en menos de un minuto. Las comprobaciones P1-P9 se superaron todas.
-Los tres escenarios (CP-01, CP-03, CP-04) generaron su alerta y ejecutaron su respuesta
-correctamente sobre el despliegue limpio:
-
-| Caso | Alerta | Respuesta | Efecto verificado |
-|------|--------|-----------|--------------------|
-| CP-01 | `100010` (17:58:46.418) | `block_ip.sh` OK (17:58:46.961 → 17:58:47.009, 48 ms) | IP `172.19.0.2` bloqueada en `WAZUH_AR`; la propia fuerza bruta quedó cortada a mitad de ejecución (intentos 9-10 con `Connection timed out`) |
-| CP-03 | `100020` ×2 | `disable_suspicious_user.sh` OK (dos invocaciones, 127 ms y 79 ms) | `passwd -S backdoor01` → `L` |
-| CP-04 | `100030` ×2 | `preserve_and_restore_file.sh`: `PRESERVADO` → `RESTAURADO` → `SIN_CAMBIOS` | Fichero preservado con hash registrado; `authorized_keys` restaurado al baseline |
-
-Antes de esta ejecución, `docs/validation_plan.md` §8 marcaba la prueba de reproducibilidad
-íntegra como la pendiente más relevante. Queda superada, con dos incidencias de artefacto
-corregidas durante la propia prueba (§7.4) y una incidencia funcional real detectada y
-corregida (§7.5): CP-02 (reversión automática de CP-01) falló en esta primera pasada porque
-`block_ip.sh` no implementaba el *handshake* `check_keys` que `execd` exige para programar el
-`delete`. Corregido el script y repetido CP-01 sobre el mismo despliegue, la reversión se
-disparó a los 300,349 s, dentro del margen del `<timeout>300</timeout>` configurado.
-
----
+| C7 | El entorno se despliega sin intervención manual sobre contenedores | Cumplido — verificado el 2026-07-27 (§6.2) y de nuevo tras las correcciones de §7.6 |

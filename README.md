@@ -1,20 +1,12 @@
 # TFM — Laboratorio de detección y respuesta automática ante técnicas APT con Wazuh
 
-Prueba de concepto reproducible que demuestra un ciclo completo de detección y respuesta
-sobre un servidor Linux corporativo simulado:
+Prueba de concepto reproducible que demuestra, sobre un servidor Linux corporativo simulado,
+el ciclo completo:
 
 ```
 Ataque simulado → evento en el servidor víctima → alerta en Wazuh
 → respuesta automática → evidencia generada → validación del resultado
 ```
-
----
-
-## 1. Objetivo del laboratorio
-
-Validar, sobre un entorno acotado y reproducible, que una organización puede detectar y
-responder de forma automática a tres comportamientos asociados a intrusiones avanzadas,
-sin necesidad de una plataforma SOAR completa ni de infraestructura dedicada.
 
 El laboratorio cubre tres escenarios mapeados a MITRE ATT&CK:
 
@@ -24,75 +16,19 @@ El laboratorio cubre tres escenarios mapeados a MITRE ATT&CK:
 | 2 | Creación de cuenta local no autorizada | Persistence | T1136 — Create Account |
 | 3 | Inserción de clave SSH no autorizada | Persistence / Defense Evasion | T1098.004 — SSH Authorized Keys |
 
-Cada escenario produce: una alerta con identificador propio, la ejecución de un script de
-respuesta, un registro con marcas de tiempo y una evidencia recuperable desde el host.
+Documentación ampliada:
+
+- [`docs/architecture.md`](docs/architecture.md) — arquitectura, flujo detallado y decisiones técnicas.
+- [`docs/mitre-mapping.md`](docs/mitre-mapping.md) — mapeo MITRE ATT&CK de cada escenario.
+- [`docs/validation_plan.md`](docs/validation_plan.md) — qué se espera de cada escenario, casos de prueba, métricas y resultados obtenidos.
 
 ---
 
-## 2. Arquitectura
-
-```
-┌──────────────┐   SSH    ┌──────────────────┐   1514/tcp  ┌──────────────────┐
-│  attacker    │─────────▶│  wazuh.agent     │────────────▶│  wazuh.manager   │
-│  (Ubuntu)    │          │  sshd + agente   │             │  reglas locales  │
-│  3 scripts   │          │  FIM + AR        │◀────────────│  Active Response │
-└──────────────┘          └────────┬─────────┘   comando   └────────┬─────────┘
-                                   │                                │ 9200/tcp
-                                   ▼                                ▼
-                          ┌──────────────────┐            ┌──────────────────┐
-                          │  ./evidence/     │            │  wazuh.indexer   │
-                          │  (volumen host)  │            └────────┬─────────┘
-                          └──────────────────┘                     │
-                                                                   ▼
-                                                          ┌──────────────────┐
-                                                          │ wazuh.dashboard  │
-                                                          │  (interfaz web)  │
-                                                          └──────────────────┘
-```
-
-### Componentes
-
-| Servicio | Imagen / origen | Función |
-|----------|-----------------|---------|
-| `wazuh.manager` | `wazuh/wazuh-manager:4.14.6` | Correlación, reglas locales, orquestación de Active Response |
-| `wazuh.indexer` | `wazuh/wazuh-indexer:4.14.6` | Almacenamiento e indexado de alertas (OpenSearch) |
-| `wazuh.dashboard` | `wazuh/wazuh-dashboard:4.14.6` | Consulta y visualización de alertas |
-| `wazuh.agent` | build `./agent-target` | Servidor víctima: sshd, usuario de prueba, agente Wazuh, scripts de respuesta |
-| `attacker` | build `./attacker` | Máquina atacante con los tres scripts de simulación |
-| `wazuh-certs-generator` | `wazuh/wazuh-certs-generator` | Bootstrap: genera la CA y los certificados TLS. Idempotente: si ya existen, no hace nada |
-| `wazuh-certs-permissions` | `alpine:3.20` | Bootstrap: normaliza permisos del volumen de certificados |
-
-Los dos servicios de bootstrap forman parte del arranque normal: `wazuh.manager`,
-`wazuh.indexer` y `wazuh.dashboard` declaran `depends_on: condition:
-service_completed_successfully` sobre ellos, así que `docker compose up -d` los ejecuta y
-espera a que terminen antes de levantar el resto. Como son contenedores de un solo disparo,
-tras `up -d` aparecerán con estado `Exited (0)` en `docker compose ps` — es el comportamiento
-esperado, no un fallo.
-
-Todos los servicios comparten la red `wazuh-network`. El único puerto publicado al host es
-el del dashboard.
-
-### Flujo de una detección
-
-1. El contenedor `attacker` ejecuta una acción ofensiva contra `wazuh.agent`.
-2. El evento queda registrado en el sistema víctima (`/var/log/auth.log` para SSH,
-   File Integrity Monitoring para cambios en ficheros).
-3. El agente envía el evento al manager, que lo evalúa contra el ruleset.
-4. Una regla local (`100010`, `100020`, `100030`/`100031`) genera la alerta y activa el
-   Active Response correspondiente.
-5. El script se ejecuta **en el agente** (`location: local`), es decir, donde ocurrió el
-   incidente, replicando el modelo de un EDR real.
-6. El script registra el resultado con marcas de tiempo y deposita la evidencia en un
-   volumen accesible desde el host.
-
----
-
-## 3. Requisitos previos
+## Requisitos previos
 
 - Docker Engine ≥ 24 y Docker Compose v2.
 - 6 GB de RAM disponibles para Docker (el indexer reserva 1 GB de heap JVM).
-- Salida a Internet **únicamente** durante la construcción de imágenes y la generación
-  inicial de certificados.
+- Salida a Internet **únicamente** la primera vez que se generan los certificados TLS.
 - `vm.max_map_count` ≥ 262144 en el host que ejecuta el motor de Docker:
 
 ```bash
@@ -100,80 +36,41 @@ sudo sysctl -w vm.max_map_count=262144
 ```
 
 > **Windows / WSL2.** Ejecuta el laboratorio desde el sistema de ficheros nativo de la
-> distribución WSL (`~/proyectos/...`), **nunca desde `/mnt/c/...`**. Los bind mounts a
-> través de `drvfs` provocan problemas de permisos y la creación de directorios fantasma
-> cuando el fichero de origen no existe. El ajuste de `vm.max_map_count` se aplica dentro
-> de la VM de WSL, no en PowerShell.
+> distribución WSL (`~/proyectos/...`), **nunca desde `/mnt/c/...`**: los bind mounts vía
+> `drvfs` dan problemas de permisos. Si `.env` se ha editado en Windows, verifica que no tenga
+> terminadores CRLF/BOM (`dos2unix .env`), o `docker compose` puede ignorar sus variables.
 
 ---
 
-## 4. Cómo levantar el entorno
+## Levantar el laboratorio
 
 El repositorio incluye un fichero `.env` con las variables del laboratorio (versiones de
-imagen y credenciales explícitamente ficticias); `docker compose` lo carga automáticamente por
-estar en la raíz del proyecto, junto a `docker-compose.yml`. No hace falta crearlo ni copiarlo
-de una plantilla.
+imagen y credenciales explícitamente ficticias); `docker compose` lo carga automáticamente.
 
 ```bash
 docker compose up -d
 docker compose ps
 ```
 
-Un único comando basta tanto en el primer arranque como en los siguientes. Internamente,
-`wazuh.manager`, `wazuh.indexer` y `wazuh.dashboard` esperan (`depends_on: condition:
-service_completed_successfully`) a dos servicios de bootstrap que se ejecutan antes:
-`wazuh-certs-generator` genera la CA y los certificados TLS solo si aún no existen —la
-herramienta oficial no es idempotente, así que el propio contenedor comprueba
-`./config/wazuh_indexer_ssl_certs/root-ca.pem` antes de invocarla— y `wazuh-certs-permissions`
-normaliza los permisos del volumen para que los tres nodos Wazuh (que corren con UID
-distintos) puedan leerlos.
+Un único comando basta tanto en el primer arranque como en los siguientes. Los cinco
+servicios principales deben aparecer como `Up`; `wazuh-certs-generator` y
+`wazuh-certs-permissions` (bootstrap de certificados TLS, idempotente) aparecerán como
+`Exited (0)` — es el comportamiento esperado. El indexer tarda entre 40 y 90 segundos en
+quedar operativo.
 
-`docker compose ps` mostrará `wazuh-certs-generator` y `wazuh-certs-permissions` como
-`Exited (0)`: es el comportamiento esperado de un contenedor de un solo disparo, no un fallo.
-Los cinco servicios restantes deben aparecer como `Up`. El indexer tarda entre 40 y 90 segundos
-en quedar operativo.
-
-> `./config/wazuh_indexer_ssl_certs/` es un *bind mount*, no un volumen Docker con nombre:
-> `docker compose down -v` no lo limpia. Es intencional — así `up -d` no tiene que regenerar
-> certificados en cada reinicio del laboratorio. Si necesitas forzar una regeneración (por
-> ejemplo, tras cambiar los nombres de servicio en `config/certs.yml`), bórralo a mano antes de
-> `up -d`: `rm -rf config/wazuh_indexer_ssl_certs/*`.
-
-Este flujo de un solo comando se ha verificado íntegro desde cero (`down` + `up -d` +
-los tres escenarios) el 2026-07-27; el detalle está en `docs/validation_plan.md`, apartado
-9bis.
-
----
-
-## 5. Cómo comprobar que Wazuh funciona
+Verificación rápida de que todo está listo:
 
 ```bash
-# El agente debe figurar como "Active"
-docker compose exec wazuh.manager /var/ossec/bin/agent_control -l
-
-# Procesos del manager en ejecución
-docker compose exec wazuh.manager /var/ossec/bin/wazuh-control status
-
-# Reglas locales cargadas
-docker compose exec wazuh.manager cat /var/ossec/etc/rules/local_rules.xml
-
-# Scripts de respuesta instalados (deben tener permisos 750 root:wazuh)
-docker compose exec wazuh.agent ls -la /var/ossec/active-response/bin/
+docker compose exec wazuh.manager /var/ossec/bin/agent_control -l   # agente "Active"
 ```
 
-**Interfaz web:** `https://localhost` (puerto publicado en `docker-compose.yml`; si lo has
-cambiado a 8443, usa `https://localhost:8443`). Usuario `admin`. El certificado es
-autofirmado, por lo que el navegador mostrará una advertencia.
-
-Para filtrar únicamente las alertas del laboratorio, en **Threat Hunting** usa la consulta:
-
-```
-rule.groups:tfm_apt_lab
-```
+**Interfaz web:** `https://localhost` (usuario `admin`, certificado autofirmado). El
+checklist completo de comprobaciones (P1-P9) está en
+[`docs/validation_plan.md`](docs/validation_plan.md#2-comprobaciones-previas).
 
 ---
 
-## 6. Cómo ejecutar cada escenario
+## Lanzar los ataques
 
 ```bash
 # Escenario 1 — Fuerza bruta SSH (T1110)
@@ -186,6 +83,9 @@ docker compose exec attacker /opt/scripts/create_user_attack.sh
 docker compose exec attacker /opt/scripts/add_ssh_key_attack.sh
 ```
 
+Qué alerta y qué respuesta esperar de cada uno, con los comandos para comprobarlo, está en
+[`docs/validation_plan.md`](docs/validation_plan.md#3-qué-se-espera-por-escenario).
+
 Notas de repetibilidad:
 
 - El escenario 2 falla si `backdoor01` ya existe. Para repetirlo:
@@ -195,107 +95,12 @@ Notas de repetibilidad:
 - **No recrees contenedores entre el ataque y la comprobación**: `/home` no es persistente
   y la evidencia en disco se perdería.
 
----
-
-## 7. Qué alerta se espera
-
-| Escenario | Regla local | Nivel | Se encadena a | Descripción |
-|-----------|-------------|-------|---------------|-------------|
-| 1 | `100010` | 12 | `5720`, `5763` | Múltiples fallos de autenticación SSH |
-| 2 | `100020` | 12 | `550`, `554` | Cambio en `/etc/passwd` o `/etc/group` |
-| 3 | `100030` | 12 | `550`, `554` | Modificación de `authorized_keys` |
-| 3 | `100031` | 12 | `550`, `554` | Modificación de `sshd_config` |
-
-Las reglas locales no reimplementan detección: reutilizan las reglas base del ruleset de
-Wazuh y añaden únicamente la correlación necesaria para identificar el escenario y disparar
-la respuesta adecuada.
-
-> La regla base que dispara la fuerza bruta en este entorno es la **5763**, no la 5720 que
-> aparece en buena parte de la documentación. Ambas se declaran en `<if_sid>` por
-> compatibilidad entre versiones del ruleset. Conviene verificar estos identificadores antes
-> de una demostración, ya que Wazuh los reorganiza entre versiones.
-
-Comprobación del recuento de alertas generadas:
-
-```bash
-docker compose exec wazuh.manager \
-  grep -o '"id":"1000[0-9][0-9]"' /var/ossec/logs/alerts/alerts.json | sort | uniq -c
-```
+Las evidencias quedan en `./evidence/` y `./results/` (ambos en el host, no se borran con
+`docker compose down -v`).
 
 ---
 
-## 8. Qué respuesta automática se espera
-
-| Escenario | Script | Acción | Reversión |
-|-----------|--------|--------|-----------|
-| 1 | `block_ip.sh` | Bloqueo de la IP origen en la cadena `WAZUH_AR` de iptables | Automática a los 300 s (`<timeout>`), verificada (300,349 s medidos). Requiere que el script implemente el *handshake* `check_keys` con `execd` — ver `docs/validation_plan.md` §7.5. Manual: `iptables -D WAZUH_AR -s <IP> -j DROP` dentro de `wazuh.agent` |
-| 2 | `disable_suspicious_user.sh` | Bloqueo de la cuenta (`usermod -L` + shell `nologin`) | Manual: `usermod -U <usuario>` |
-| 3 | `preserve_and_restore_file.sh` | Preserva copia con hash SHA256 y restaura el baseline limpio | Manual: copia preservada en `./evidence/` |
-
-Salvaguardas comunes a los tres scripts:
-
-- **Whitelists** (`whitelist.conf`) de IPs y usuarios que nunca deben verse afectados,
-  incluidas las cuentas del sistema y la infraestructura del propio laboratorio.
-- **Registro con marcas de tiempo** de inicio y fin en cada ejecución.
-- **Nunca se destruye evidencia**: el fichero alterado se copia antes de cualquier
-  modificación, y los nombres incluyen milisegundos más un sufijo anticolisión.
-- **Corte de realimentación**: la restauración de un fichero monitorizado es a su vez una
-  modificación que el FIM detecta. El script compara con el baseline y, si coinciden,
-  registra `SIN_CAMBIOS` y no actúa, evitando un bucle de auto-disparo.
-
-Tiempos de ejecución medidos en el laboratorio:
-
-| Escenario | Script | Tiempo |
-|-----------|--------|--------|
-| 1 | `block_ip.sh` | 41 ms |
-| 2 | `disable_suspicious_user.sh` | 88 ms |
-| 3 | `preserve_and_restore_file.sh` | 45 ms |
-
----
-
-## 9. Cómo consultar evidencias
-
-Todas las evidencias se escriben en el directorio `./evidence/` del host, montado en el
-agente como `/var/ossec/evidence`.
-
-```bash
-# Registro cronológico de todas las respuestas automáticas
-cat evidence/active_response.log
-
-# Ficheros preservados antes de su restauración
-ls -la evidence/
-
-# Registro de hashes SHA256 (integridad de la evidencia)
-cat evidence/hashes.txt
-
-# Verificación de un fichero preservado
-sha256sum evidence/2026*_home_corpuser_.ssh_authorized_keys
-
-# Marcas de tiempo del lado atacante (para calcular el tiempo total de respuesta)
-docker compose exec attacker cat /opt/results/timings.log
-
-# Log nativo de Active Response de Wazuh
-docker compose exec wazuh.agent tail -20 /var/ossec/logs/active-responses.log
-```
-
-Comprobación del efecto real sobre el sistema:
-
-```bash
-docker compose exec wazuh.agent iptables -L WAZUH_AR -n     # IP bloqueada
-docker compose exec wazuh.agent passwd -S backdoor01        # 'L' = cuenta bloqueada
-docker compose exec wazuh.agent cat /home/corpuser/.ssh/authorized_keys  # restaurado
-```
-
-### Cálculo de métricas
-
-Cruzando `results/timings.log` (instante del ataque), el campo `timestamp` de
-`alerts.json` (instante de la alerta) y `evidence/active_response.log` (inicio y fin del
-script) se obtienen el tiempo de detección, el tiempo de ejecución de la respuesta y el
-tiempo total de respuesta.
-
----
-
-## 10. Cómo apagar y limpiar el entorno
+## Apagar y limpiar el entorno
 
 ```bash
 # Parada conservando volúmenes y evidencias
@@ -306,12 +111,10 @@ docker compose down -v
 ```
 
 `docker compose up -d` basta para volver a levantar el laboratorio después de cualquiera de
-los dos comandos anteriores; no hace falta ningún paso adicional. Los certificados TLS
-(`./config/wazuh_indexer_ssl_certs/`) son un *bind mount*, no un volumen con nombre, así que
-`down -v` no los toca y `wazuh-certs-generator` los detecta y no los regenera.
+los dos comandos anteriores; no hace falta ningún paso adicional (los certificados TLS son un
+*bind mount*, no un volumen con nombre, así que `down -v` no los toca).
 
-Las evidencias de `./evidence/` y `./results/` residen en el host y **no se borran** con
-`docker compose down -v`. Elimínalas manualmente si quieres partir de cero:
+Para partir de cero también en evidencias:
 
 ```bash
 rm -f evidence/2026* evidence/active_response.log evidence/hashes.txt results/timings.log
@@ -319,37 +122,12 @@ rm -f evidence/2026* evidence/active_response.log evidence/hashes.txt results/ti
 
 ---
 
-## Apéndice — Puntos de fricción conocidos
-
-Recopilación de los problemas encontrados durante el despliegue. Su documentación forma
-parte del objetivo de reproducibilidad.
-
-| Síntoma | Causa | Solución |
-|---------|-------|----------|
-| `The tool to create the certificates does not exist in any bucket` | El generador necesita salida a Internet | No incluir ese contenedor en redes `internal: true` |
-| `Invalid IP or DNS wazuh-indexer` | El validador rechaza nombres de una sola etiqueta | Nombrar los servicios con punto: `wazuh.indexer`, `wazuh.manager` |
-| `Directory wazuh-certificates already exists` | El generador no es idempotente | Resuelto: el `entrypoint` de `wazuh-certs-generator` comprueba si ya existe `root-ca.pem` y se salta la generación en vez de invocar la herramienta oficial. Si necesitas forzarla, `rm -rf config/wazuh_indexer_ssl_certs/*` primero — `docker compose down -v` no basta, porque ese directorio es un *bind mount* |
-| `AccessDeniedException: .../certs` | Permisos del volumen de certificados | Contenedor `wazuh-certs-permissions` (`chmod -R a+rX`), encadenado con `depends_on` tras el generador |
-| `no such service: wazuh-certs-generator` | El README documentaba estos comandos antes de que los servicios existieran en `docker-compose.yml` | Resuelto: son servicios normales del compose, con `depends_on: condition: service_completed_successfully` desde `wazuh.manager`/`wazuh.indexer`/`wazuh.dashboard`. `docker compose up -d` ya los ejecuta en orden (detalle en `docs/validation_plan.md` §7.4 y §7.6) |
-| `OutOfMemoryError: direct buffer memory` | Heap JVM insuficiente | `OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g` en el compose |
-| `not a directory` al montar un `.yml` | Docker crea un directorio si el fichero de origen no existe | Borrar el directorio fantasma y crear el fichero real |
-| Cambios en `ossec.conf` sin efecto | El volumen `agent-etc` cachea la configuración anterior | `docker volume rm <proyecto>_agent-etc` y recrear |
-| Alertas SSH ausentes | El agente leía `/var/log/secure`, inexistente en esta imagen | Configurar `/var/log/auth.log` |
-| El escenario 2 no crea el usuario | `sudo -n` falla si se solicita contraseña | `NOPASSWD` acotado a `useradd`, `chpasswd`, `userdel`, `usermod` |
-| Variables del `.env` ignoradas | Terminadores CRLF o BOM procedentes de Windows | Regenerar el fichero en Linux o aplicar `dos2unix` |
-
----
-
-## Advertencias de seguridad
+## Advertencia de seguridad
 
 Este laboratorio contiene configuraciones **deliberadamente débiles** con fines
-demostrativos, que no deben trasladarse a ningún entorno real:
-
-- `PasswordAuthentication yes` en SSH, necesario para simular el escenario 1.
-- Registro automático de agentes sin contraseña (`<auth><use_password>no`).
-- Certificados autofirmados con permisos de lectura universal.
-- Credenciales de laboratorio explícitamente ficticias (`corpuser` / `Lab-Ficticio-2026!`).
-- Privilegios `sudo` sin contraseña, acotados a la gestión de cuentas.
-
-Todo el tráfico ofensivo queda confinado a la red Docker del laboratorio. Ninguna acción
+demostrativos (SSH con autenticación por contraseña, registro de agentes sin contraseña,
+credenciales ficticias en texto plano) que no deben trasladarse a ningún entorno real.
+Detalle completo y justificación en
+[`docs/architecture.md`](docs/architecture.md#4-consideraciones-de-seguridad-del-entorno).
+Todo el tráfico ofensivo queda confinado a la red Docker del laboratorio; ninguna acción
 automática modifica el sistema anfitrión.
