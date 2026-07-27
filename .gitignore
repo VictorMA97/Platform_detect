@@ -1,6 +1,9 @@
 # Sensitive local artifacts and generated secrets
 config/wazuh_indexer_ssl_certs/
-evidence/
+evidence/*
+!evidence/.gitkeep
+results/*
+!results/.gitkeep
 
 # Common secret and certificate files
 *.pem
