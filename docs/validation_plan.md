@@ -358,6 +358,53 @@ hay ningún error que registrar: simplemente nadie programó el recordatorio. Cu
 temporizador que se añada al laboratorio en el futuro (o se adapte de este) debe replicar este
 handshake, no solo el manejo de `add`/`delete`.
 
+### 7.6 Desviaciones estructurales pendientes de la revisión inicial, corregidas el 2026-07-27
+
+Tras cerrar C7, una revisión posterior identificó cuatro desviaciones entre el repositorio y
+los requisitos originales de la prueba de concepto que la ejecución de §9bis no cubría por
+seguir siendo, en ese momento, técnicamente correctas aunque incómodas:
+
+1. **`docker compose up -d` no bastaba por sí solo.** Corregido en §7.4 solo a medias: los
+   servicios `wazuh-certs-generator`/`wazuh-certs-permissions` ya existían, pero seguían bajo
+   `profiles: [bootstrap]` y exigían dos `docker compose run --rm` previos. Se sustituyó el
+   perfil por `depends_on: condition: service_completed_successfully` desde
+   `wazuh.manager`/`wazuh.indexer`/`wazuh.dashboard`, y se hizo idempotente el `entrypoint` del
+   generador (comprueba `root-ca.pem` antes de invocar la herramienta oficial). Verificado:
+   `docker compose down` + `docker compose up -d` sin ningún paso intermedio, con el generador
+   detectando los certificados existentes y omitiendo la regeneración (`docker compose logs
+   wazuh-certs-generator` → `"Certificados ya existentes... no se regeneran."`).
+
+2. **`results/` no era persistente.** El servicio `attacker` no montaba ningún volumen para
+   `/opt/results`; los tiempos de ataque (`timings.log`) vivían solo dentro del contenedor y se
+   perdían al recrearlo, pese a que el README y la estructura de repositorio esperada los daban
+   por accesibles desde el host. Se añadió `./results:/opt/results` al servicio `attacker` y
+   `results/.gitkeep` con la misma convención de `.gitignore` que `evidence/`. Verificado:
+   `results/timings.log` aparece en el host tras ejecutar `ssh_bruteforce_test.sh`.
+
+3. **No existía `.env`.** Las credenciales y versiones de imagen estaban escritas directamente
+   en `docker-compose.yml`. Se creó `.env` con todas ellas (`WAZUH_STACK_VERSION`,
+   `WAZUH_AGENT_PACKAGE_VERSION`, credenciales de indexer/dashboard/API, usuario de laboratorio)
+   y se sustituyeron los valores literales por `${VAR:?...}` en el compose, de modo que un
+   `.env` ausente o incompleto falla explícitamente en vez de arrancar con un valor equivocado.
+   **Aviso documentado en el propio `.env`**: los usuarios `admin` y `kibanaserver` del indexer
+   tienen un hash bcrypt fijo en `config/wazuh_indexer/internal_users.yml`; cambiar
+   `INDEXER_PASSWORD` o `DASHBOARD_PASSWORD` sin regenerar ese hash rompe la autenticación. Las
+   demás variables (API, laboratorio, versiones) son libres.
+
+4. **El Dockerfile del atacante instalaba `hydra` y diccionarios sin usar.**
+   `ssh_bruteforce_test.sh` siempre implementó la fuerza bruta con un bucle propio de
+   `sshpass`, no con `hydra`; el binario y los ficheros `users.txt`/`passwords.txt` eran peso
+   muerto que además contradecía la afirmación de `docs/architecture.md` de que el atacante
+   "no incorpora herramientas ofensivas de propósito general". Eliminados del Dockerfile.
+
+**Generalización.** Ninguna de las cuatro era un defecto funcional del laboratorio en el
+sentido de C1-C7 — el entorno detectaba, respondía y generaba evidencia igualmente. Eran
+desviaciones entre lo que el repositorio hace y lo que dice que hace (o lo que la propia
+estructura del proyecto promete). En una prueba de concepto cuyo argumento central es la
+reproducibilidad, esa clase de desviación es tan relevante como un fallo funcional: cada una
+habría obligado al tribunal, o a la empresa evaluando el POC, a improvisar un paso no
+documentado.
+
 ---
 
 ## 8. Pruebas pendientes

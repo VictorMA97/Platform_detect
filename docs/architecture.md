@@ -225,22 +225,33 @@ baseline y, si el fichero ya coincide, registra el evento como auto-inducido y n
 Este patrón —una respuesta automática que dispara su propio detonante— es un riesgo general
 de cualquier automatización que modifique elementos supervisados.
 
-### 3.8 Bootstrap de certificados separado del ciclo de vida
+### 3.8 Bootstrap de certificados idempotente, integrado en `docker compose up -d`
 
-La generación de certificados TLS se ejecuta como paso previo explícito
-(`docker compose run --rm`) y no como dependencia de arranque. `wazuh-certs-generator` y
-`wazuh-certs-permissions` están definidos en el mismo `docker-compose.yml` que el resto del
-laboratorio, bajo `profiles: [bootstrap]`, de modo que `docker compose up -d` no los levanta.
-Dos motivos imponen esta separación:
+La generación de certificados TLS se resolvió con un único requisito no negociable de la
+prueba de concepto: el laboratorio debe levantarse con `docker compose up -d` y nada más,
+tanto en el primer arranque como en los siguientes. La herramienta oficial de generación de
+certificados **no es idempotente** — aborta si detecta certificados de una ejecución
+anterior—, lo que en un primer diseño obligó a tratarla como un paso manual previo
+(`docker compose run --rm`). Esa solución generaba exactamente el problema que se quería
+evitar: un despliegue que no arrancaba con un único comando.
 
-- La herramienta oficial **no es idempotente**: aborta si detecta certificados de una
-  ejecución anterior, de modo que cualquier reintento de arranque fallaría.
-- El contenedor generador es el **único elemento del laboratorio que requiere salida a
-  Internet**, ya que descarga la utilidad de generación. No participa en ningún escenario y
-  puede desconectarse tras el arranque inicial.
+La solución adoptada envuelve el `entrypoint` de `wazuh-certs-generator` en una comprobación:
+si `./config/wazuh_indexer_ssl_certs/root-ca.pem` ya existe, el contenedor se limita a
+informar y termina con éxito; si no existe, invoca la herramienta oficial. `wazuh.manager`,
+`wazuh.indexer` y `wazuh.dashboard` declaran `depends_on` sobre `wazuh-certs-generator` y
+`wazuh-certs-permissions` con la condición `service_completed_successfully`, de modo que
+Compose ejecuta la cadena completa (certificados → permisos → nodos Wazuh) dentro de un único
+`docker compose up -d`, sin intervención humana y sin fallar en reintentos.
 
-Separar la creación de material criptográfico del ciclo operativo es, además, una práctica
-razonable con independencia de la limitación técnica.
+El contenedor generador sigue siendo el **único elemento del laboratorio que requiere salida a
+Internet**, ya que descarga la utilidad de generación la primera vez que se ejecuta de verdad;
+en arranques posteriores, al detectar certificados existentes, ni siquiera llega a
+necesitarla.
+
+Como el volumen de certificados es un *bind mount* (`./config/wazuh_indexer_ssl_certs/`) y no
+un volumen Docker con nombre, `docker compose down -v` no lo elimina — es intencional: permite
+que `up -d` sea instantáneo tras un `down -v` en lugar de tener que regenerar la CA y todos los
+certificados derivados en cada ciclo de prueba.
 
 ### 3.9 Nomenclatura de los servicios
 

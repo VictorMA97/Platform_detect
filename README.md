@@ -59,12 +59,15 @@ respuesta, un registro con marcas de tiempo y una evidencia recuperable desde el
 | `wazuh.dashboard` | `wazuh/wazuh-dashboard:4.14.6` | Consulta y visualización de alertas |
 | `wazuh.agent` | build `./agent-target` | Servidor víctima: sshd, usuario de prueba, agente Wazuh, scripts de respuesta |
 | `attacker` | build `./attacker` | Máquina atacante con los tres scripts de simulación |
-| `wazuh-certs-generator` | `wazuh/wazuh-certs-generator` | Bootstrap de un solo uso: genera la CA y los certificados TLS |
-| `wazuh-certs-permissions` | `alpine:3.20` | Bootstrap de un solo uso: normaliza permisos del volumen de certificados |
+| `wazuh-certs-generator` | `wazuh/wazuh-certs-generator` | Bootstrap: genera la CA y los certificados TLS. Idempotente: si ya existen, no hace nada |
+| `wazuh-certs-permissions` | `alpine:3.20` | Bootstrap: normaliza permisos del volumen de certificados |
 
-Los dos servicios de bootstrap están bajo el perfil `bootstrap` (`profiles: [bootstrap]`), por
-lo que `docker compose up -d` no los levanta: solo se ejecutan explícitamente con
-`docker compose run --rm <servicio>`.
+Los dos servicios de bootstrap forman parte del arranque normal: `wazuh.manager`,
+`wazuh.indexer` y `wazuh.dashboard` declaran `depends_on: condition:
+service_completed_successfully` sobre ellos, así que `docker compose up -d` los ejecuta y
+espera a que terminen antes de levantar el resto. Como son contenedores de un solo disparo,
+tras `up -d` aparecerán con estado `Exited (0)` en `docker compose ps` — es el comportamiento
+esperado, no un fallo.
 
 Todos los servicios comparten la red `wazuh-network`. El único puerto publicado al host es
 el del dashboard.
@@ -106,35 +109,39 @@ sudo sysctl -w vm.max_map_count=262144
 
 ## 4. Cómo levantar el entorno
 
-La generación de certificados es un **paso previo de un solo uso**, deliberadamente separado
-del ciclo de vida habitual: la herramienta oficial de Wazuh no es idempotente y aborta si
-detecta certificados de una ejecución anterior.
-
-> `./config/wazuh_indexer_ssl_certs/` es un *bind mount*, no un volumen Docker con nombre:
-> `docker compose down -v` **no lo limpia**. Si ya existen certificados de una ejecución
-> previa, bórralos a mano antes de regenerarlos (paso 1 de abajo).
+El repositorio incluye un fichero `.env` con las variables del laboratorio (versiones de
+imagen y credenciales explícitamente ficticias); `docker compose` lo carga automáticamente por
+estar en la raíz del proyecto, junto a `docker-compose.yml`. No hace falta crearlo ni copiarlo
+de una plantilla.
 
 ```bash
-# 0. Solo si ya existen certificados de una ejecución anterior
-rm -rf config/wazuh_indexer_ssl_certs/*
-
-# 1. Certificados TLS (solo la primera vez, o tras el paso 0)
-docker compose run --rm wazuh-certs-generator
-
-# 2. Normalización de permisos sobre el volumen de certificados
-docker compose run --rm wazuh-certs-permissions
-
-# 3. Laboratorio completo
 docker compose up -d
-
-# 4. Estado
 docker compose ps
 ```
 
-Todos los servicios deben aparecer como `Up`. El indexer tarda entre 40 y 90 segundos en
-quedar operativo. Estos cuatro pasos se han verificado íntegros desde cero (`down -v` +
-limpieza de certificados + redespliegue completo + los tres escenarios) el 2026-07-27; el
-detalle está en `docs/validation_plan.md`, apartado 9bis.
+Un único comando basta tanto en el primer arranque como en los siguientes. Internamente,
+`wazuh.manager`, `wazuh.indexer` y `wazuh.dashboard` esperan (`depends_on: condition:
+service_completed_successfully`) a dos servicios de bootstrap que se ejecutan antes:
+`wazuh-certs-generator` genera la CA y los certificados TLS solo si aún no existen —la
+herramienta oficial no es idempotente, así que el propio contenedor comprueba
+`./config/wazuh_indexer_ssl_certs/root-ca.pem` antes de invocarla— y `wazuh-certs-permissions`
+normaliza los permisos del volumen para que los tres nodos Wazuh (que corren con UID
+distintos) puedan leerlos.
+
+`docker compose ps` mostrará `wazuh-certs-generator` y `wazuh-certs-permissions` como
+`Exited (0)`: es el comportamiento esperado de un contenedor de un solo disparo, no un fallo.
+Los cinco servicios restantes deben aparecer como `Up`. El indexer tarda entre 40 y 90 segundos
+en quedar operativo.
+
+> `./config/wazuh_indexer_ssl_certs/` es un *bind mount*, no un volumen Docker con nombre:
+> `docker compose down -v` no lo limpia. Es intencional — así `up -d` no tiene que regenerar
+> certificados en cada reinicio del laboratorio. Si necesitas forzar una regeneración (por
+> ejemplo, tras cambiar los nombres de servicio en `config/certs.yml`), bórralo a mano antes de
+> `up -d`: `rm -rf config/wazuh_indexer_ssl_certs/*`.
+
+Este flujo de un solo comando se ha verificado íntegro desde cero (`down` + `up -d` +
+los tres escenarios) el 2026-07-27; el detalle está en `docs/validation_plan.md`, apartado
+9bis.
 
 ---
 
@@ -294,12 +301,14 @@ tiempo total de respuesta.
 # Parada conservando volúmenes y evidencias
 docker compose down
 
-# Limpieza completa (elimina volúmenes: certificados, índices, configuración del agente)
+# Limpieza completa (elimina volúmenes con nombre: índices, configuración del agente, etc.)
 docker compose down -v
 ```
 
-Tras `down -v` es obligatorio repetir los pasos 1 y 2 del apartado 4, ya que el volumen de
-certificados se elimina.
+`docker compose up -d` basta para volver a levantar el laboratorio después de cualquiera de
+los dos comandos anteriores; no hace falta ningún paso adicional. Los certificados TLS
+(`./config/wazuh_indexer_ssl_certs/`) son un *bind mount*, no un volumen con nombre, así que
+`down -v` no los toca y `wazuh-certs-generator` los detecta y no los regenera.
 
 Las evidencias de `./evidence/` y `./results/` residen en el host y **no se borran** con
 `docker compose down -v`. Elimínalas manualmente si quieres partir de cero:
@@ -319,9 +328,9 @@ parte del objetivo de reproducibilidad.
 |---------|-------|----------|
 | `The tool to create the certificates does not exist in any bucket` | El generador necesita salida a Internet | No incluir ese contenedor en redes `internal: true` |
 | `Invalid IP or DNS wazuh-indexer` | El validador rechaza nombres de una sola etiqueta | Nombrar los servicios con punto: `wazuh.indexer`, `wazuh.manager` |
-| `Directory wazuh-certificates already exists` | El generador no es idempotente | `rm -rf config/wazuh_indexer_ssl_certs/*` — **no** basta con `docker compose down -v`, porque ese directorio es un *bind mount* y `down -v` solo elimina volúmenes con nombre |
-| `AccessDeniedException: .../certs` | Permisos del volumen de certificados | Contenedor `wazuh-certs-permissions` (`chmod -R a+rX`) |
-| `no such service: wazuh-certs-generator` | El README documentaba estos comandos antes de que los servicios existieran en `docker-compose.yml` | Añadidos como servicios `profiles: [bootstrap]` en el propio compose (detalle en `docs/validation_plan.md` §7.4) |
+| `Directory wazuh-certificates already exists` | El generador no es idempotente | Resuelto: el `entrypoint` de `wazuh-certs-generator` comprueba si ya existe `root-ca.pem` y se salta la generación en vez de invocar la herramienta oficial. Si necesitas forzarla, `rm -rf config/wazuh_indexer_ssl_certs/*` primero — `docker compose down -v` no basta, porque ese directorio es un *bind mount* |
+| `AccessDeniedException: .../certs` | Permisos del volumen de certificados | Contenedor `wazuh-certs-permissions` (`chmod -R a+rX`), encadenado con `depends_on` tras el generador |
+| `no such service: wazuh-certs-generator` | El README documentaba estos comandos antes de que los servicios existieran en `docker-compose.yml` | Resuelto: son servicios normales del compose, con `depends_on: condition: service_completed_successfully` desde `wazuh.manager`/`wazuh.indexer`/`wazuh.dashboard`. `docker compose up -d` ya los ejecuta en orden (detalle en `docs/validation_plan.md` §7.4 y §7.6) |
 | `OutOfMemoryError: direct buffer memory` | Heap JVM insuficiente | `OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g` en el compose |
 | `not a directory` al montar un `.yml` | Docker crea un directorio si el fichero de origen no existe | Borrar el directorio fantasma y crear el fichero real |
 | Cambios en `ossec.conf` sin efecto | El volumen `agent-etc` cachea la configuración anterior | `docker volume rm <proyecto>_agent-etc` y recrear |
