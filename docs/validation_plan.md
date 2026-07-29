@@ -627,6 +627,47 @@ efecto es que `docker compose down` (sin `-v`) ya no conserva estado en los siet
 retirados — irrelevante, porque ninguno de los tres escenarios ni las comprobaciones P1-P9 lo
 necesitaban.
 
+### 7.9 Limpieza de artefactos huérfanos de la reorganización a `victim`
+
+**Observación.** Una revisión de la estructura del repositorio encontró restos del rename
+`wazuh.agent` → `victim` (§7.7) que no eran errores funcionales pero sí desviaciones entre lo
+que el repositorio contiene y lo que realmente se usa:
+
+- `docker-compose.yml` montaba `./victim/ossec.conf:/wazuh-config-mount/etc/ossec.conf:ro` en
+  el servicio `victim`. Ese bind mount no lo lee nadie: `entrypoint-wrapper.sh` usa
+  directamente `/var/ossec/etc/ossec.conf` (horneado en la imagen desde
+  `victim/wazuh_agent/ossec.conf` vía `COPY`), no `/wazuh-config-mount`. Ese mecanismo solo es
+  real en la imagen **oficial** del manager (`wazuh.manager` sí lo consume); se copió por
+  analogía al Dockerfile propio de `victim` sin implementar el lado que lo hace funcionar.
+- El origen de ese bind mount, `victim/ossec.conf`, era además un **directorio fantasma**
+  vacío — ni siquiera estaba trackeado en git (`git ls-files` no lo lista) — recreado por
+  Docker en cada arranque por apuntar a un fichero inexistente, el mismo síntoma ya descrito en
+  `docs/architecture.md` §6 (Notas operativas).
+- `attacker/scripts/create_user_attack.sh` tenía tres mensajes de error que mencionaban
+  `agent-target`, el nombre del directorio antes del rename a `victim`.
+- Los ocho scripts `.sh` del repositorio estaban trackeados en git con modo `100644` (sin bit
+  de ejecución) en vez de `100755`. No rompía nada porque tanto el Dockerfile del atacante
+  como `entrypoint-wrapper.sh` fuerzan `chmod` en build/arranque — pero cualquiera que clonara
+  el repo para ejecutar un script directamente, sin pasar por Docker, se habría encontrado con
+  un permiso denegado sin motivo aparente.
+
+**Corrección aplicada.** Eliminados el bind mount muerto y el directorio fantasma; corregidos
+los tres mensajes de error a `victim`; los ocho scripts recommiteados con `git update-index
+--chmod=+x`.
+
+**Verificación.** Ciclo completo `docker compose down -v` + `up -d --build`: `victim/` no
+contiene ningún `ossec.conf` tras el arranque (no se recreó el fantasma), `wazuh-control
+status` muestra los mismos procesos activos que antes de la limpieza, y los tres escenarios
+(CP-01, CP-03, CP-04) generan su alerta, ejecutan su respuesta y dejan evidencia igual que en
+todas las ejecuciones anteriores.
+
+**Generalización.** Ningún hallazgo de esta entrada afectaba al ciclo
+ataque→alerta→respuesta→evidencia — a diferencia de §7.7, aquí no había nada roto en
+funcionamiento. Se documenta de todos modos porque en una prueba de concepto cuyo argumento es
+la reproducibilidad y la claridad para un tribunal externo, un bind mount que no hace nada y un
+directorio con el mismo nombre que el fichero que sí se usa son ruido que cuesta tiempo de
+lectura ajeno, aunque no cuesten funcionalidad.
+
 ---
 
 ## 8. Pruebas pendientes
