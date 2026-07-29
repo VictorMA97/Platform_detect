@@ -138,7 +138,6 @@ services:
     volumes:
       - agent-etc:/var/ossec/etc
       - agent-queue:/var/ossec/queue
-      - ./victim/ossec.conf:/wazuh-config-mount/etc/ossec.conf:ro
       - ./victim/scripts-active-response:/opt/ar-src:ro
       - ./evidence:/var/ossec/evidence
       - ./baseline:/opt/baseline:ro

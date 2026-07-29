@@ -15,9 +15,9 @@ if echo "${salida}" | grep -q "CREACION_OK"; then
     log_event "create_user_end" "OK" "Usuario ${ROGUE_USER} creado correctamente en ${TARGET_HOST}"
     echo "Usuario sospechoso '${ROGUE_USER}' creado. Revisa la alerta FIM de Wazuh sobre /etc/passwd (regla 100020/100021)."
 elif echo "${salida}" | grep -qi "password is required\|sudo:"; then
-    log_event "create_user_end" "FALLO_PRIVILEGIOS" "corpuser no tiene sudo sin contrasena en agent-target: ${salida}"
-    echo "ERROR: '${TARGET_USER}' no tiene privilegios sudo sin contraseña en agent-target."
-    echo "Añade al Dockerfile de agent-target algo como:"
+    log_event "create_user_end" "FALLO_PRIVILEGIOS" "corpuser no tiene sudo sin contrasena en victim: ${salida}"
+    echo "ERROR: '${TARGET_USER}' no tiene privilegios sudo sin contraseña en victim."
+    echo "Añade al Dockerfile de victim algo como:"
     echo "  RUN echo 'corpuser ALL=(ALL) NOPASSWD: /usr/sbin/useradd, /usr/sbin/chpasswd' >> /etc/sudoers"
     exit 1
 else
