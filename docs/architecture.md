@@ -279,6 +279,32 @@ proceso de retirarlo — y los puntos que quedaron rotos al hacerlo, en particul
 `wazuh.agent` renombrado a `victim` sin actualizar quién más lo daba por sentado — está
 documentado como incidencia en `docs/validation_plan.md` §7.7.
 
+### 3.11 Reducción de volúmenes con nombre
+
+El `docker-compose.yml` oficial de Wazuh declara volúmenes con nombre para cada subsistema del
+manager, pensado para un despliegue de producción con todas sus capacidades activas. Este
+laboratorio no las usa todas: no hay grupos de agentes más allá de `default`, ninguna
+integración de terceros configurada, ningún dispositivo monitorizado sin agente, ningún módulo
+extendido (osquery, CIS-CAT, nubes...), y con `location: local` es el agente —no el
+manager— quien ejecuta las respuestas automáticas (§3.4), por lo que el directorio de Active
+Response del propio manager no cumple ninguna función en esta arquitectura.
+
+Mantener volúmenes con nombre para directorios que el laboratorio nunca usa no aporta nada:
+solo persisten un contenido vacío o irrelevante a través de `docker compose down`. Se
+eliminaron siete de los catorce originales (`wazuh_api_configuration`, `wazuh_var_multigroups`,
+`wazuh_integrations`, `wazuh_active_response` del manager, `wazuh_agentless`, `wazuh_wodles`,
+`filebeat_etc`), dejando solo los que el laboratorio ejercita de verdad: los datos indexados
+(`wazuh-indexer-data`), los logs nativos del manager (`wazuh_logs`), el registro de Filebeat
+que evita reenvíos duplicados al indexer (`filebeat_var`), y el estado de registro del agente a
+ambos lados —manager y agente deben ir sincronizados, o uno cree que el otro lo reconoce cuando
+no es así— (`wazuh_etc`/`agent-etc`, `wazuh_queue`/`agent-queue`).
+
+Verificado con un ciclo completo `down -v` + `up -d` + los tres escenarios + una consulta a la
+API del indexer: el laboratorio funciona igual, incluyendo el envío de alertas a través de
+Filebeat pese a no persistir su configuración (`filebeat_etc`), que se regenera en cada
+arranque desde la plantilla y las variables de entorno. Detalle y hallazgos en
+`docs/validation_plan.md` §7.8.
+
 ---
 
 ## 4. Consideraciones de seguridad del entorno

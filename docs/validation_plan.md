@@ -588,6 +588,45 @@ configuración que lo dé por sentado) deja de funcionar en silencio, sin ningú
 hasta el intento de conexión. Es la misma clase de riesgo que motivó §7.4 y §7.6: cambiar la
 infraestructura sin auditar exhaustivamente quién depende de sus nombres.
 
+### 7.8 Reducción de volúmenes con nombre (14 → 7)
+
+**Motivación.** Revisión de qué volúmenes con nombre del manager tienen una función real en
+este laboratorio, frente a los heredados del `docker-compose.yml` oficial de Wazuh pensados
+para capacidades que aquí no se usan (grupos de agentes múltiples, integraciones de terceros,
+dispositivos sin agente, módulos extendidos, Active Response ejecutado en el manager en vez de
+en el agente). Detalle de la justificación por volumen en `docs/architecture.md` §3.11.
+
+**Cambio aplicado.** Eliminados de `docker-compose.yml`: `wazuh_api_configuration`,
+`wazuh_var_multigroups`, `wazuh_integrations`, `wazuh_active_response` (del manager),
+`wazuh_agentless`, `wazuh_wodles`, `filebeat_etc`. Se mantienen `wazuh-indexer-data`,
+`wazuh_logs`, `wazuh_queue`/`agent-queue`, `wazuh_etc`/`agent-etc` y `filebeat_var`.
+
+**Verificación.** Ciclo completo `docker compose down -v` + `up -d` con el compose reducido,
+seguido de los tres escenarios y una consulta directa a la API del indexer:
+
+| Comprobación | Resultado |
+|---|---|
+| Arranque del manager sin `wazuh_active_response`/`wazuh_agentless`/`wazuh_wodles`/`wazuh_api_configuration`/`wazuh_var_multigroups`/`wazuh_integrations` | `wazuh-control status`: mismos procesos en ejecución que antes del cambio |
+| CP-01 (fuerza bruta) | Alerta `100010`, `block_ip.sh RESULTADO=OK` |
+| CP-03 (cuenta local) | Alerta `100020` ×2, `passwd -S backdoor01` → `L` |
+| CP-04 (clave SSH) | Alerta `100030` ×2, secuencia `PRESERVADO`→`RESTAURADO`→`SIN_CAMBIOS` |
+| Filebeat sin `filebeat_etc` como volumen | Proceso arrancado con configuración regenerada; `GET /wazuh-alerts-*/_count` en el indexer → `432` documentos, sin errores de envío |
+
+**Hallazgo colateral: volúmenes huérfanos.** Tras eliminar los siete volúmenes de
+`docker-compose.yml` y ejecutar `docker compose down -v`, `docker volume ls` seguía mostrando
+los siete: `down -v` solo elimina los volúmenes **declarados en el fichero en ese momento**, no
+los que declaraba una versión anterior. Quedaron huérfanos en disco, invisibles para cualquier
+`down -v` futuro, hasta que se eliminaron a mano con `docker volume rm`. Es la misma naturaleza
+de problema que el `bind mount` de certificados que `down -v` tampoco limpia (§7.4): cambiar
+qué persiste una configuración no limpia retroactivamente lo que ya había persistido con la
+configuración anterior.
+
+**Impacto en la reproducibilidad.** Ninguno sobre el ciclo ataque→alerta→respuesta→evidencia:
+todas las comprobaciones dieron el mismo resultado que con los catorce volúmenes. El único
+efecto es que `docker compose down` (sin `-v`) ya no conserva estado en los siete directorios
+retirados — irrelevante, porque ninguno de los tres escenarios ni las comprobaciones P1-P9 lo
+necesitaban.
+
 ---
 
 ## 8. Pruebas pendientes

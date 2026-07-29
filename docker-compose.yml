@@ -72,16 +72,9 @@ services:
       - API_USERNAME=${API_USERNAME:?falta API_USERNAME en .env}
       - API_PASSWORD=${API_PASSWORD:?falta API_PASSWORD en .env}
     volumes:
-      - wazuh_api_configuration:/var/ossec/api/configuration
       - wazuh_etc:/var/ossec/etc
       - wazuh_logs:/var/ossec/logs
       - wazuh_queue:/var/ossec/queue
-      - wazuh_var_multigroups:/var/ossec/var/multigroups
-      - wazuh_integrations:/var/ossec/integrations
-      - wazuh_active_response:/var/ossec/active-response/bin
-      - wazuh_agentless:/var/ossec/agentless
-      - wazuh_wodles:/var/ossec/wodles
-      - filebeat_etc:/etc/filebeat
       - filebeat_var:/var/lib/filebeat
       - ./config/wazuh_indexer_ssl_certs/root-ca-manager.pem:/etc/ssl/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/wazuh.manager.pem:/etc/ssl/filebeat.pem
@@ -172,15 +165,8 @@ networks:
 volumes:
   agent-etc:
   agent-queue:
-  wazuh_api_configuration:
   wazuh_etc:
   wazuh_logs:
   wazuh_queue:
-  wazuh_var_multigroups:
-  wazuh_integrations:
-  wazuh_active_response:
-  wazuh_agentless:
-  wazuh_wodles:
-  filebeat_etc:
   filebeat_var:
   wazuh-indexer-data:
