@@ -65,11 +65,10 @@ RUN if ! grep -q '<location>/var/log/auth.log</location>' \
     fi
 
 COPY entrypoint-wrapper.sh /entrypoint-wrapper.sh
-
 COPY wazuh_agent/ossec.conf /var/ossec/etc/ossec.conf
-RUN chown root:wazuh /var/ossec/etc/ossec.conf && chmod 640 /var/ossec/etc/ossec.conf
-
-RUN chmod 0755 /entrypoint-wrapper.sh
+RUN chown root:wazuh /var/ossec/etc/ossec.conf && \
+    chmod 640 /var/ossec/etc/ossec.conf && \
+    chmod 0755 /entrypoint-wrapper.sh
 
 EXPOSE 22
 

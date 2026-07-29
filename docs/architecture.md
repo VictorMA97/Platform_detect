@@ -17,14 +17,14 @@ virtual, sin dependencias del sistema anfitrión más allá del motor de contene
   ┌──────────────────────────────────────────────────────────────────────┐
   │                                                                      │
   │  ┌──────────────┐   SSH (22)   ┌──────────────────┐                  │
-  │  │  attacker    │─────────────▶│  wazuh.agent     │                  │
+  │  │  attacker    │─────────────▶│  victim          │                  │
   │  │              │              │                  │                  │
   │  │ • bruteforce │              │ • sshd + rsyslog │                  │
   │  │ • create_user│              │ • usuario corpuser│                 │
   │  │ • add_ssh_key│              │ • agente Wazuh   │                  │
   │  └──────────────┘              │ • FIM (syscheck) │                  │
-  │                                │ • scripts de AR  │                  │
-  │                                └────────┬─────────┘                  │
+  │                                │ • scripts de AR  │──▶ ./evidence/   │
+  │                                └────────┬─────────┘    (bind mount) │
   │                          eventos (1514) │  ▲ comando AR              │
   │                                         ▼  │                         │
   │                                ┌──────────────────┐                  │
@@ -38,29 +38,24 @@ virtual, sin dependencias del sistema anfitrión más allá del motor de contene
   │                                         │ alertas (9200)             │
   │                                         ▼                            │
   │                                ┌──────────────────┐                  │
-  │                                │  wazuh.indexer   │                  │
-  │                                └────────┬─────────┘                  │
-  │                                         │                            │
-  │                                         ▼                            │
-  │                                ┌──────────────────┐                  │
-  │                                │ wazuh.dashboard  │───▶ host :443    │
-  │                                └──────────────────┘                  │
+  │                                │  wazuh.indexer   │──▶ host :9200    │
+  │                                └──────────────────┘   (API REST)    │
   └──────────────────────────────────────────────────────────────────────┘
-                                         │
-                                         ▼
-                              ./evidence/  (bind mount)
 ```
+
+Sin interfaz web: la consulta de alertas se hace directamente sobre `alerts.json` en el
+manager o contra la API REST del indexer (puerto 9200, publicado al host). Es una decisión
+deliberada — ver §3.2 y §3.10.
 
 ### Componentes y responsabilidades
 
 | Componente | Rol en la arquitectura |
 |------------|------------------------|
 | `attacker` | Origen controlado de actividad ofensiva. Contiene únicamente cliente SSH y `sshpass`; no incorpora herramientas ofensivas de propósito general, ya que los tres escenarios se reproducen con scripts propios y deterministas. |
-| `wazuh.agent` | Servidor víctima. Concentra tres funciones que en un entorno real coexisten en la misma máquina: servicio expuesto (`sshd`), telemetría (agente Wazuh con FIM) y capacidad de respuesta (scripts de Active Response). |
+| `victim` | Servidor víctima. Concentra tres funciones que en un entorno real coexisten en la misma máquina: servicio expuesto (`sshd`), telemetría (agente Wazuh con FIM) y capacidad de respuesta (scripts de Active Response). |
 | `wazuh.manager` | Núcleo de detección. Recibe los eventos, los normaliza mediante decoders, los evalúa contra el ruleset y decide qué respuesta ordenar. |
-| `wazuh.indexer` | Persistencia e indexado de alertas (OpenSearch). No participa en la detección ni en la respuesta. |
-| `wazuh.dashboard` | Capa de consulta. Permite explorar las alertas y sirve de soporte visual para la demostración. |
-| `wazuh-certs-generator` | Contenedor de bootstrap de un solo uso. Genera la autoridad de certificación y los certificados TLS de los tres nodos Wazuh, y finaliza. |
+| `wazuh.indexer` | Persistencia e indexado de alertas (OpenSearch). No participa en la detección ni en la respuesta. Única capa de consulta del laboratorio (§3.10). |
+| `wazuh-certs-generator` | Contenedor de bootstrap de un solo uso. Genera la autoridad de certificación y los certificados TLS de los nodos Wazuh, y finaliza. |
 
 ---
 
@@ -69,7 +64,7 @@ virtual, sin dependencias del sistema anfitrión más allá del motor de contene
 ### 2.1 Ataque
 
 El contenedor `attacker` ejecuta uno de los tres scripts de simulación contra
-`wazuh.agent`, resuelto por DNS interno de Docker. Cada script registra en
+`victim`, resuelto por DNS interno de Docker. Cada script registra en
 `/opt/results/timings.log` una marca de tiempo de inicio y de fin en formato ISO 8601 con
 milisegundos, que constituye el instante de referencia para el cálculo posterior de métricas.
 
@@ -175,7 +170,7 @@ de ataque sin beneficio para la demostración.
 
 El escenario 1 requiere manipular reglas de cortafuegos dentro del contenedor víctima. Se
 optó por conceder únicamente las capacidades `NET_ADMIN` y `NET_RAW` al servicio
-`wazuh.agent`, en lugar de ejecutar el contenedor en modo `privileged`. El resto de
+`victim`, en lugar de ejecutar el contenedor en modo `privileged`. El resto de
 servicios no recibe capacidad adicional alguna.
 
 Las reglas se insertan en una cadena dedicada (`WAZUH_AR`) en lugar de en `INPUT`
@@ -237,8 +232,8 @@ evitar: un despliegue que no arrancaba con un único comando.
 
 La solución adoptada envuelve el `entrypoint` de `wazuh-certs-generator` en una comprobación:
 si `./config/wazuh_indexer_ssl_certs/root-ca.pem` ya existe, el contenedor se limita a
-informar y termina con éxito; si no existe, invoca la herramienta oficial. `wazuh.manager`,
-`wazuh.indexer` y `wazuh.dashboard` declaran `depends_on` sobre `wazuh-certs-generator` y
+informar y termina con éxito; si no existe, invoca la herramienta oficial. `wazuh.manager` y
+`wazuh.indexer` declaran `depends_on` sobre `wazuh-certs-generator` y
 `wazuh-certs-permissions` con la condición `service_completed_successfully`, de modo que
 Compose ejecuta la cadena completa (certificados → permisos → nodos Wazuh) dentro de un único
 `docker compose up -d`, sin intervención humana y sin fallar en reintentos.
@@ -255,12 +250,34 @@ certificados derivados en cada ciclo de prueba.
 
 ### 3.9 Nomenclatura de los servicios
 
-Los servicios Wazuh se nombran con punto (`wazuh.manager`, `wazuh.indexer`,
-`wazuh.dashboard`) siguiendo la convención del despliegue oficial. No es una elección
-estética: el validador de la herramienta de certificados rechaza los nombres de una sola
-etiqueta, por lo que un nombre como `wazuh-indexer` impide generar los certificados. Los
-nombres deben coincidir exactamente con los declarados en `certs.yml`, ya que se
-incorporan al certificado y la verificación TLS posterior los compara.
+Los servicios Wazuh que participan en el intercambio TLS se nombran con punto
+(`wazuh.manager`, `wazuh.indexer`) siguiendo la convención del despliegue oficial. No es una
+elección estética: el validador de la herramienta de certificados rechaza los nombres de una
+sola etiqueta, por lo que un nombre como `wazuh-indexer` impide generar los certificados. Los
+nombres deben coincidir exactamente con los declarados en `certs.yml`, ya que se incorporan al
+certificado y la verificación TLS posterior los compara. Los servicios ajenos a ese intercambio
+(`victim`, `attacker`) no están sujetos a esta restricción y se nombran por su rol.
+
+### 3.10 Retirada de `wazuh.dashboard`
+
+El laboratorio se simplificó eliminando el nodo `wazuh.dashboard`. La justificación es de
+alcance: el dashboard es una capa de visualización orientada a un operador humano explorando
+alertas de forma interactiva, y no participa en ningún punto del ciclo que la prueba de
+concepto necesita demostrar (ataque → evento → alerta → respuesta → evidencia → validación).
+Todo ese ciclo es verificable sin interfaz web: las alertas son consultables directamente
+sobre `alerts.json` en el manager o contra la API REST del indexer (puerto 9200), como hace de
+hecho todo el plan de validación (`docs/validation_plan.md`).
+
+Retirarlo reduce además la superficie de la prueba de concepto: un nodo menos que desplegar,
+un certificado TLS menos que generar y mantener, y un usuario interno (`kibanaserver`) menos
+en `internal_users.yml`. Para una demostración en vídeo o ante tribunal, sigue siendo posible
+añadir de nuevo `wazuh.dashboard` como servicio opcional sin afectar al resto de la
+arquitectura, ya que ningún otro componente depende de él.
+
+Esta decisión se tomó después de que el laboratorio ya funcionara con dashboard incluido; el
+proceso de retirarlo — y los puntos que quedaron rotos al hacerlo, en particular el servicio
+`wazuh.agent` renombrado a `victim` sin actualizar quién más lo daba por sentado — está
+documentado como incidencia en `docs/validation_plan.md` §7.7.
 
 ---
 

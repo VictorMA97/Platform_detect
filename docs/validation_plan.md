@@ -27,18 +27,23 @@ Deben superarse todas antes de iniciar los casos de prueba.
 
 | # | Comprobación | Orden | Resultado esperado |
 |---|--------------|-------|--------------------|
-| P1 | Servicios activos | `docker compose ps` | Cinco servicios en estado `Up`; `wazuh-certs-generator` y `wazuh-certs-permissions` en `Exited (0)` |
+| P1 | Servicios activos | `docker compose ps` | Cuatro servicios en estado `Up` (`wazuh.manager`, `wazuh.indexer`, `victim`, `attacker`); `wazuh-certs-generator` y `wazuh-certs-permissions` en `Exited (0)` |
 | P2 | Agente registrado | `docker compose exec wazuh.manager /var/ossec/bin/agent_control -l` | Agente en estado `Active` |
 | P3 | Procesos del manager | `docker compose exec wazuh.manager /var/ossec/bin/wazuh-control status` | Todos en ejecución |
 | P4 | Reglas locales cargadas | `docker compose exec wazuh.manager cat /var/ossec/etc/rules/local_rules.xml` | Reglas 100010–100031 presentes |
-| P5 | Scripts de respuesta instalados | `docker compose exec wazuh.agent ls -la /var/ossec/active-response/bin/` | Tres scripts con permisos `750 root:wazuh` |
-| P6 | Dependencias del agente | `docker compose exec wazuh.agent sh -c "which jq iptables"` | Ambas utilidades presentes |
+| P5 | Scripts de respuesta instalados | `docker compose exec victim ls -la /var/ossec/active-response/bin/` | Tres scripts con permisos `750 root:wazuh` |
+| P6 | Dependencias del agente | `docker compose exec victim sh -c "which jq iptables"` | Ambas utilidades presentes |
 | P7 | Configuración de Active Response | `docker compose exec wazuh.manager grep -c "block-ip-lab" /var/ossec/etc/ossec.conf` | Valor mayor que cero |
-| P8 | Línea base de cuentas | `docker compose exec wazuh.agent sh -c "cut -d: -f1 /etc/passwd \| sort > /var/ossec/evidence/passwd.baseline"` | Fichero generado |
-| P9 | Interfaz web accesible | `https://localhost` (usuario `admin`) | Autenticación correcta |
+| P8 | Línea base de cuentas | `docker compose exec victim sh -c "cut -d: -f1 /etc/passwd \| sort > /var/ossec/evidence/passwd.baseline"` | Fichero generado |
+| P9 | API REST del indexer accesible | `curl -sk -u admin:<INDEXER_PASSWORD> https://localhost:9200` | Respuesta JSON con `"cluster_name"` |
 
-Para filtrar únicamente las alertas del laboratorio en **Threat Hunting** del dashboard, usa
-la consulta `rule.groups:tfm_apt_lab`.
+Sin interfaz web (§3.10 de `docs/architecture.md`), filtrar las alertas del laboratorio se
+hace por el campo `rule.groups` directamente sobre `alerts.json`:
+
+```bash
+docker compose exec wazuh.manager \
+  grep '"groups":\["local","tfm_apt_lab"' /var/ossec/logs/alerts/alerts.json
+```
 
 > **Verificación de identificadores del ruleset.** Antes de una demostración conviene
 > confirmar que las reglas base declaradas en `<if_sid>` siguen siendo las que dispara la
@@ -78,7 +83,7 @@ docker compose exec wazuh.manager \
 
 | Escenario | Script | Acción | Reversión |
 |-----------|--------|--------|-----------|
-| 1 | `block_ip.sh` | Bloqueo de la IP origen en la cadena `WAZUH_AR` de iptables | Automática a los 300 s (`<timeout>`), verificada (300,349 s medidos, §7.5). Manual: `iptables -D WAZUH_AR -s <IP> -j DROP` dentro de `wazuh.agent` |
+| 1 | `block_ip.sh` | Bloqueo de la IP origen en la cadena `WAZUH_AR` de iptables | Automática a los 300 s (`<timeout>`), verificada (300,349 s medidos, §7.5). Manual: `iptables -D WAZUH_AR -s <IP> -j DROP` dentro de `victim` |
 | 2 | `disable_suspicious_user.sh` | Bloqueo de la cuenta (`usermod -L` + shell `nologin`) | Manual: `usermod -U <usuario>` |
 | 3 | `preserve_and_restore_file.sh` | Preserva copia con hash SHA256 y restaura el baseline limpio | Manual: copia preservada en `./evidence/` |
 
@@ -128,8 +133,8 @@ intentos antes de disparar.
 docker compose exec attacker /opt/scripts/ssh_bruteforce_test.sh
 sleep 15
 docker compose exec wazuh.manager grep -o '"id":"100010"' /var/ossec/logs/alerts/alerts.json | wc -l
-docker compose exec wazuh.agent tail -3 /var/ossec/logs/active-responses.log
-docker compose exec wazuh.agent iptables -L WAZUH_AR -n
+docker compose exec victim tail -3 /var/ossec/logs/active-responses.log
+docker compose exec victim iptables -L WAZUH_AR -n
 ```
 
 **Criterios de aceptación.** Se genera al menos una alerta `100010`; el registro contiene una
@@ -142,8 +147,8 @@ Verifica que la contención es temporal y no requiere intervención humana.
 
 ```bash
 # Transcurridos 300 s desde CP-01
-docker compose exec wazuh.agent grep REVERTIDO /var/ossec/logs/active-responses.log
-docker compose exec wazuh.agent iptables -L WAZUH_AR -n
+docker compose exec victim grep REVERTIDO /var/ossec/logs/active-responses.log
+docker compose exec victim iptables -L WAZUH_AR -n
 ```
 
 **Criterios de aceptación.** Aparece una entrada `RESULTADO=REVERTIDO`; la regla `DROP` ha
@@ -156,8 +161,8 @@ desaparecido de la cadena.
 ```bash
 docker compose exec attacker /opt/scripts/create_user_attack.sh
 sleep 15
-docker compose exec wazuh.agent tail -3 /var/ossec/logs/active-responses.log
-docker compose exec wazuh.agent passwd -S backdoor01
+docker compose exec victim tail -3 /var/ossec/logs/active-responses.log
+docker compose exec victim passwd -S backdoor01
 ```
 
 **Criterios de aceptación.** Se genera la alerta `100020`; el registro contiene
@@ -171,10 +176,10 @@ docker compose exec wazuh.agent passwd -S backdoor01
 ```bash
 docker compose exec attacker /opt/scripts/add_ssh_key_attack.sh
 sleep 15
-docker compose exec wazuh.agent tail -5 /var/ossec/logs/active-responses.log
+docker compose exec victim tail -5 /var/ossec/logs/active-responses.log
 ls -la evidence/
 cat evidence/hashes.txt
-docker compose exec wazuh.agent cat /home/corpuser/.ssh/authorized_keys
+docker compose exec victim cat /home/corpuser/.ssh/authorized_keys
 ```
 
 **Criterios de aceptación.** Registro con `PRESERVADO` y `RESTAURADO`; existe un fichero
@@ -189,7 +194,7 @@ Comprueba que las salvaguardas impiden actuar sobre elementos protegidos.
 # Añadir temporalmente la IP del atacante a WHITELIST_IPS en whitelist.conf
 docker compose exec attacker /opt/scripts/ssh_bruteforce_test.sh
 sleep 15
-docker compose exec wazuh.agent grep OMITIDO_WHITELIST /var/ossec/logs/active-responses.log
+docker compose exec victim grep OMITIDO_WHITELIST /var/ossec/logs/active-responses.log
 ```
 
 **Criterios de aceptación.** Se genera la alerta, pero el registro indica
@@ -250,15 +255,15 @@ sha256sum evidence/2026*_home_corpuser_.ssh_authorized_keys
 cat results/timings.log
 
 # Log nativo de Active Response de Wazuh (no persistente entre redespliegues)
-docker compose exec wazuh.agent tail -20 /var/ossec/logs/active-responses.log
+docker compose exec victim tail -20 /var/ossec/logs/active-responses.log
 ```
 
 Comprobación del efecto real sobre el sistema:
 
 ```bash
-docker compose exec wazuh.agent iptables -L WAZUH_AR -n     # IP bloqueada
-docker compose exec wazuh.agent passwd -S backdoor01        # 'L' = cuenta bloqueada
-docker compose exec wazuh.agent cat /home/corpuser/.ssh/authorized_keys  # restaurado
+docker compose exec victim iptables -L WAZUH_AR -n     # IP bloqueada
+docker compose exec victim passwd -S backdoor01        # 'L' = cuenta bloqueada
+docker compose exec victim cat /home/corpuser/.ssh/authorized_keys  # restaurado
 ```
 
 ### Método de cálculo
@@ -542,6 +547,46 @@ estructura del proyecto promete). En una prueba de concepto cuyo argumento centr
 reproducibilidad, esa clase de desviación es tan relevante como un fallo funcional: cada una
 habría obligado al tribunal, o a la empresa evaluando el POC, a improvisar un paso no
 documentado.
+
+### 7.7 Retirada de `wazuh.dashboard` sin actualizar quién más lo daba por sentado
+
+**Observación.** Se retiró el servicio `wazuh.dashboard` de `docker-compose.yml` (decisión de
+alcance, justificada en `docs/architecture.md` §3.10) y, en el mismo cambio, se renombró el
+servicio `wazuh.agent` a `victim`. El segundo cambio, aparentemente cosmético, rompió los tres
+scripts de ataque: `attacker/scripts/common.sh` fijaba `TARGET_HOST="${TARGET_HOST:-wazuh.agent}"`,
+y ese nombre dejó de resolver por DNS interno de Docker en cuanto el servicio pasó a llamarse
+`victim` (`getent hosts wazuh.agent` → sin resultado; `getent hosts victim` → resuelve).
+Confirmado que el fallo era real y no solo teórico: antes de la corrección, los tres escenarios
+habrían fallado en el primer paso, con un error de conexión SSH.
+
+**Otros artefactos huérfanos encontrados al auditar la retirada:**
+
+- Certificados TLS generados para el nodo `dashboard` (`wazuh.dashboard.pem`,
+  `wazuh.dashboard-key.pem`) que ya no los consume nadie — eliminados.
+- El nodo `dashboard` seguía declarado en `config/certs.yml`, por lo que una regeneración de
+  certificados los habría vuelto a crear — eliminado del fichero.
+- El usuario interno `kibanaserver` en `config/wazuh_indexer/internal_users.yml`, exclusivo
+  del dashboard — eliminado.
+- Las variables `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` en `.env`, sin ningún consumidor en
+  `docker-compose.yml` tras la retirada del servicio — eliminadas.
+- La comprobación P9 ("Interfaz web accesible") y el consejo de usar **Threat Hunting** para
+  filtrar alertas (§2) daban por hecho que existía un dashboard — sustituidos por una
+  comprobación directa contra la API REST del indexer y un `grep` sobre `alerts.json`.
+
+**Corrección aplicada.** `attacker/scripts/common.sh` actualizado a `TARGET_HOST:-victim`,
+imagen del atacante reconstruida, y los artefactos huérfanos listados arriba eliminados.
+
+**Verificación.** Tras la corrección: `getent hosts victim` resuelve desde `attacker`;
+`ssh_bruteforce_test.sh` ejecutado de nuevo genera la alerta `100010`
+(`"groups":["local","tfm_apt_lab","tfm_scenario_1","authentication_failures"]`), `block_ip.sh`
+bloquea la IP y la revierte automáticamente a los ~301 s; la API REST del indexer responde en
+`https://localhost:9200` con las credenciales de `.env`.
+
+**Generalización.** Un rename de servicio en `docker-compose.yml` no es un cambio aislado: todo
+lo que resuelve ese nombre por DNS interno (scripts propios, pero también cualquier
+configuración que lo dé por sentado) deja de funcionar en silencio, sin ningún mensaje de error
+hasta el intento de conexión. Es la misma clase de riesgo que motivó §7.4 y §7.6: cambiar la
+infraestructura sin auditar exhaustivamente quién depende de sus nombres.
 
 ---
 

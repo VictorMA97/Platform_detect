@@ -52,11 +52,11 @@ docker compose up -d
 docker compose ps
 ```
 
-Un único comando basta tanto en el primer arranque como en los siguientes. Los cinco
-servicios principales deben aparecer como `Up`; `wazuh-certs-generator` y
-`wazuh-certs-permissions` (bootstrap de certificados TLS, idempotente) aparecerán como
-`Exited (0)` — es el comportamiento esperado. El indexer tarda entre 40 y 90 segundos en
-quedar operativo.
+Un único comando basta tanto en el primer arranque como en los siguientes. Los cuatro
+servicios principales (`wazuh.manager`, `wazuh.indexer`, `victim`, `attacker`) deben aparecer
+como `Up`; `wazuh-certs-generator` y `wazuh-certs-permissions` (bootstrap de certificados TLS,
+idempotente) aparecerán como `Exited (0)` — es el comportamiento esperado. El indexer tarda
+entre 40 y 90 segundos en quedar operativo.
 
 Verificación rápida de que todo está listo:
 
@@ -64,8 +64,9 @@ Verificación rápida de que todo está listo:
 docker compose exec wazuh.manager /var/ossec/bin/agent_control -l   # agente "Active"
 ```
 
-**Interfaz web:** `https://localhost` (usuario `admin`, certificado autofirmado). El
-checklist completo de comprobaciones (P1-P9) está en
+El laboratorio no incluye interfaz web (sin `wazuh.dashboard`): las alertas se consultan
+directamente sobre `alerts.json` o la API REST del indexer. El checklist completo de
+comprobaciones (P1-P9) está en
 [`docs/validation_plan.md`](docs/validation_plan.md#2-comprobaciones-previas).
 
 ---
@@ -89,7 +90,7 @@ Qué alerta y qué respuesta esperar de cada uno, con los comandos para comproba
 Notas de repetibilidad:
 
 - El escenario 2 falla si `backdoor01` ya existe. Para repetirlo:
-  `docker compose exec wazuh.agent userdel -r backdoor01`
+  `docker compose exec victim userdel -r backdoor01`
 - El escenario 3 requiere que el contenido de `authorized_keys` cambie realmente; el FIM no
   genera eventos si el fichero queda idéntico.
 - **No recrees contenedores entre el ataque y la comprobación**: `/home` no es persistente

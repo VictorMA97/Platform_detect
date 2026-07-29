@@ -9,6 +9,8 @@ services:
   wazuh-certs-generator:
     image: wazuh/wazuh-certs-generator:0.0.4
     hostname: wazuh-certs-generator
+    networks:
+      - wazuh-network
     environment:
       - CERT_TOOL_VERSION=4.14
     volumes:
@@ -29,6 +31,8 @@ services:
   # distintos. Idempotente (chmod), se ejecuta siempre tras el generador.
   wazuh-certs-permissions:
     image: alpine:3.20
+    networks:
+      - wazuh-network
     depends_on:
       wazuh-certs-generator:
         condition: service_completed_successfully
@@ -114,43 +118,10 @@ services:
       - ./config/wazuh_indexer_ssl_certs/admin-key.pem:/usr/share/wazuh-indexer/config/certs/admin-key.pem
       - ./config/wazuh_indexer/wazuh.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
-
-  wazuh.dashboard:
-    image: wazuh/wazuh-dashboard:${WAZUH_STACK_VERSION:?falta WAZUH_STACK_VERSION en .env}
-    hostname: wazuh.dashboard
-    restart: always
-    depends_on:
-      wazuh-certs-permissions:
-        condition: service_completed_successfully
-      wazuh.indexer:
-        condition: service_started
-    networks:
-      - wazuh-network
-    ports:
-      - 443:5601
-    environment:
-      - INDEXER_USERNAME=${INDEXER_USERNAME:?falta INDEXER_USERNAME en .env}
-      - INDEXER_PASSWORD=${INDEXER_PASSWORD:?falta INDEXER_PASSWORD en .env}
-      - WAZUH_API_URL=https://wazuh.manager
-      - DASHBOARD_USERNAME=${DASHBOARD_USERNAME:?falta DASHBOARD_USERNAME en .env}
-      - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:?falta DASHBOARD_PASSWORD en .env}
-      - API_USERNAME=${API_USERNAME:?falta API_USERNAME en .env}
-      - API_PASSWORD=${API_PASSWORD:?falta API_PASSWORD en .env}
-    volumes:
-      - ./config/wazuh_indexer_ssl_certs/wazuh.dashboard.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard.pem
-      - ./config/wazuh_indexer_ssl_certs/wazuh.dashboard-key.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard-key.pem
-      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-dashboard/certs/root-ca.pem
-      - ./config/wazuh_dashboard/opensearch_dashboards.yml:/usr/share/wazuh-dashboard/config/opensearch_dashboards.yml
-      - ./config/wazuh_dashboard/wazuh.yml:/usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml
-      - wazuh-dashboard-config:/usr/share/wazuh-dashboard/data/wazuh/config
-      - wazuh-dashboard-custom:/usr/share/wazuh-dashboard/plugins/wazuh/public/assets/custom
-    links:
-      - wazuh.indexer:wazuh.indexer
-      - wazuh.manager:wazuh.manager
   
-  wazuh.agent:
+  victim:
     build:
-      context: ./agent-target
+      context: ./victim
       args:
         WAZUH_VERSION: ${WAZUH_AGENT_PACKAGE_VERSION:?falta WAZUH_AGENT_PACKAGE_VERSION en .env}
     hostname: agent-poc-1
@@ -174,8 +145,8 @@ services:
     volumes:
       - agent-etc:/var/ossec/etc
       - agent-queue:/var/ossec/queue
-      - ./agent-target/ossec.conf:/wazuh-config-mount/etc/ossec.conf:ro
-      - ./active-response:/opt/ar-src:ro
+      - ./victim/ossec.conf:/wazuh-config-mount/etc/ossec.conf:ro
+      - ./victim/scripts-active-response:/opt/ar-src:ro
       - ./evidence:/var/ossec/evidence
       - ./baseline:/opt/baseline:ro
     ports:
@@ -213,5 +184,3 @@ volumes:
   filebeat_etc:
   filebeat_var:
   wazuh-indexer-data:
-  wazuh-dashboard-config:
-  wazuh-dashboard-custom:

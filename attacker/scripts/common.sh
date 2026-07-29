@@ -2,7 +2,7 @@
 # Variables y funciones comunes a los tres scripts de ataque.
 # Se sobreescriben por variable de entorno si hace falta apuntar a otro objetivo.
 
-TARGET_HOST="${TARGET_HOST:-wazuh.agent}"
+TARGET_HOST="${TARGET_HOST:-victim}"
 TARGET_USER="${TARGET_USER:-corpuser}"
 TARGET_PASS="${TARGET_PASS:-Lab-Ficticio-2026!}"
 TARGET_PORT="${TARGET_PORT:-22}"
