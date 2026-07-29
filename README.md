@@ -14,12 +14,12 @@ El laboratorio cubre tres escenarios mapeados a MITRE ATT&CK:
 |---|-----------|---------|---------|
 | 1 | Acceso no autorizado por SSH (fuerza bruta) | Credential Access | T1110 — Brute Force |
 | 2 | Creación de cuenta local no autorizada | Persistence | T1136 — Create Account |
-| 3 | Inserción de clave SSH no autorizada | Persistence / Defense Evasion | T1098.004 — SSH Authorized Keys |
+| 3 | Inserción de clave SSH no autorizada | Persistence / Privilege Escalation | T1098.004 — SSH Authorized Keys |
 
 Documentación ampliada:
 
 - [`docs/architecture.md`](docs/architecture.md) — arquitectura, flujo detallado y decisiones técnicas.
-- [`docs/mitre-mapping.md`](docs/mitre-mapping.md) — mapeo MITRE ATT&CK de cada escenario.
+- [`docs/mitre_mapping.md`](docs/mitre_mapping.md) — mapeo MITRE ATT&CK de cada escenario.
 - [`docs/validation_plan.md`](docs/validation_plan.md) — qué se espera de cada escenario, casos de prueba, métricas y resultados obtenidos.
 
 ---

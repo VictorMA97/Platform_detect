@@ -17,7 +17,6 @@ de Wazuh implicadas y las respuestas automáticas asociadas.
 | 1 | Brute Force: Password Guessing | T1110.001 | Credential Access | `100010` | `block_ip.sh` |
 | 2 | Create Account: Local Account | T1136.001 | Persistence | `100020` | `disable_suspicious_user.sh` |
 | 3 | Account Manipulation: SSH Authorized Keys | T1098.004 | Persistence, Privilege Escalation | `100030` | `preserve_and_restore_file.sh` |
-| 3b | Account Manipulation: SSH Authorized Keys | T1098.004 | Persistence, Privilege Escalation | `100031` | `preserve_and_restore_file.sh` |
 
 Los tres escenarios reproducen una secuencia coherente dentro de una intrusión: obtención de
 acceso mediante credenciales, establecimiento de persistencia por cuenta propia y
