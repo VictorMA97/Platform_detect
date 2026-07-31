@@ -32,13 +32,4 @@
     <group>tfm_scenario_3,persistence,defense_evasion,</group>
   </rule>
 
-  <!-- ESCENARIO 3b: modificacion de sshd_config -->
-  <rule id="100031" level="12">
-    <if_sid>550,554</if_sid>
-    <field name="file">/etc/ssh/sshd_config</field>
-    <description>TFM-LAB: Modificacion de sshd_config</description>
-    <mitre><id>T1098.004</id></mitre>
-    <group>tfm_scenario_3,persistence,defense_evasion,</group>
-  </rule>
-
 </group>
