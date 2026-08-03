@@ -89,6 +89,13 @@ Qué alerta y qué respuesta esperar de cada uno, con los comandos para comproba
 
 Notas de repetibilidad:
 
+- El escenario 1 bloquea la IP de `attacker` durante 300 s (reversión automática) y eso
+  impide repetir el escenario 1 y bloquea SSH para los escenarios 2 y 3 mientras dure. Para
+  quitar el bloqueo a mano en vez de esperar:
+  ```bash
+  docker compose exec victim iptables -L WAZUH_AR -n            # ver la IP bloqueada
+  docker compose exec victim iptables -D WAZUH_AR -s <IP> -j DROP
+  ```
 - El escenario 2 falla si `backdoor01` ya existe. Para repetirlo:
   `docker compose exec victim userdel -r backdoor01`
 - El escenario 3 requiere que el contenido de `authorized_keys` cambie realmente; el FIM no
