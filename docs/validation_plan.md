@@ -668,6 +668,127 @@ la reproducibilidad y la claridad para un tribunal externo, un bind mount que no
 directorio con el mismo nombre que el fichero que sí se usa son ruido que cuesta tiempo de
 lectura ajeno, aunque no cuesten funcionalidad.
 
+### 7.10 Medición formal del tiempo de detección
+
+**Motivación.** Cerrar la pendiente de §8: hasta ahora se medía la duración de cada script de
+respuesta (tabla de §6.1), pero nunca se había cruzado sistemáticamente con el instante del
+ataque y el de la alerta para obtener el tiempo de detección y el tiempo total, tal como exige
+la definición de métricas de §5.
+
+**Herramienta.** `scripts/measure_timings.sh <1|2|3> [--no-launch]` automatiza el cruce que
+antes se hacía a mano con `grep`: lanza el escenario (o mide el último ya lanzado, con
+`--no-launch`), y calcula tiempo de detección, latencia de despacho manager→agente, duración
+de la respuesta y tiempo total, leyendo `results/timings.log`, consultando `alerts.json` en
+`wazuh.manager` vía `docker compose exec`, y leyendo `evidence/active_response.log`.
+
+Como los tres logs son acumulativos entre ejecuciones —y el escenario 3 genera además una
+segunda alerta auto-inducida al restaurar el fichero (§7.1)— no basta con tomar la última línea
+de cada fichero: el script filtra por lo que ocurre en o después del inicio del ataque medido,
+y de ahí toma lo más temprano.
+
+**Hallazgo durante la construcción de la herramienta.** Una primera medición manual (antes de
+escribir el script) tomó por error el timestamp de alerta más temprano por orden cronológico
+para el escenario 1, y calculó una latencia de despacho de ~1,4 s entre alerta y respuesta. Al
+automatizar la extracción se descubrió la causa: `alerts.json` no está estrictamente ordenado
+por timestamp a nivel de milisegundo — dos alertas de la regla `100010` para el mismo ataque
+aparecen en el fichero en orden inverso a su marca de tiempo. Tomando la alerta correcta (la
+que coincide en orden de fichero, no la más temprana por valor), la latencia de despacho baja a
+3-5 ms, coherente con una llamada local entre contenedores. El dato de 1,4 s no era real; era
+un artefacto de medir a mano sin tener en cuenta este comportamiento de Wazuh.
+
+**Resultados (2026-08-04, `docker compose up -d` limpio):**
+
+| Escenario | Tiempo de detección | Despacho manager→agente | Duración de la respuesta | Tiempo total |
+|---|---|---|---|---|
+| 1 — Fuerza bruta SSH | 29,79 s | 5 ms | 74 ms | 29,87 s |
+| 2 — Cuenta local | 262 ms | 3 ms | 221 ms (2 invocaciones) | 486 ms |
+| 3 — Clave SSH | 198 ms | 2 ms | 48 ms | 248 ms |
+
+**Lectura.** En el escenario 1, el 99,7 % del tiempo total es correlación del SIEM acumulando
+intentos fallidos hasta cruzar el umbral de la regla de frecuencia — la respuesta en sí (74 ms)
+es irrelevante frente a eso. En los escenarios 2 y 3, con detección por FIM en vez de por
+correlación de frecuencia, el tiempo de detección baja a cientos de milisegundos y la respuesta
+pesa proporcionalmente más. La latencia de despacho manager→agente es, en los tres casos,
+despreciable (≤5 ms).
+
+**Generalización.** El caso de los ~1,4 s medidos a mano es un recordatorio de que cruzar logs
+manualmente con `grep`/`tail` es propenso a error precisamente en los casos con varias líneas
+candidatas — que son, además, los más interesantes de medir. Vale la pena automatizarlo con una
+herramienta que aplique el mismo criterio de filtrado siempre, en vez de fiarse del ojo.
+
+### 7.11 El FIM en tiempo real de `/etc/passwd`/`/etc/group` solo detecta el primer cambio por arranque
+
+**Observación.** Al verificar `scripts/measure_timings.sh` con lanzamientos reales y repetidos
+del escenario 2, la primera ejecución generó su alerta `100020` con normalidad, pero un
+`userdel -r backdoor01` + `create_user_attack.sh` posteriores, sobre el mismo contenedor
+`victim` sin reiniciar, **no generaron ninguna alerta nueva** — ni con 15 s de margen, ni tras
+un `sed -i` directo sobre `/etc/passwd`, ni tras un `docker compose exec wazuh.manager
+agent_control -r -u 001` (rescan remoto de syscheck).
+
+**Investigación.** Prueba controlada, aislando la variable "cuántos cambios lleva el agente
+desde que arrancó":
+
+| Prueba | Momento | Resultado |
+|---|---|---|
+| A | Primer cambio en `/etc/passwd`/`/etc/group` tras `docker compose restart victim` (con margen para que `syscheckd` termine su arranque) | **Detectado** (alertas 2→4) |
+| B | Segundo cambio, mismo contenedor, sin reiniciar | **No detectado** (4→4) |
+| — | `agent_control -r -u 001` (rescan remoto) + tercer cambio | **No detectado** (4→4) |
+| C | `docker compose restart victim` de nuevo + cuarto cambio, con margen | **Detectado** (4→6) |
+
+Repetido tres veces el ciclo "reinicio → primer cambio detectado → segundo cambio no
+detectado", con el mismo resultado las tres veces.
+
+**Causa probable.** `/etc/passwd` y `/etc/group` están declarados con `realtime="yes"` en
+`ossec.conf` (no `whodata`: como ya documenta `docs/architecture.md` §5, el motor whodata no
+arranca en este contenedor por no haber `auditd`, y `syscheckd` lo degrada automáticamente a
+`realtime` — confirmado en el log: `WARNING: (6923): Who-data engine cannot start because
+Auditd is not running`). El modo `realtime` depende de un *watch* de `inotify` sobre el inodo
+del fichero. `useradd`/`userdel` (como la mayoría de herramientas de `shadow-utils`) no
+modifican el fichero en su sitio: escriben una copia temporal y hacen `rename()` sobre el
+original — lo habitual para garantizar una escritura atómica. Ese `rename()` sustituye el
+inodo que el *watch* vigilaba; si `syscheckd` no vuelve a armar el *watch* sobre el inodo
+nuevo, cualquier cambio posterior a esa ruta deja de ser visible para el motor de tiempo real,
+sin que se registre ningún error ni aviso — el proceso `wazuh-syscheckd` sigue "corriendo" con
+total normalidad. Es coherente con que el resto de rutas monitorizadas con éxito repetido en
+todas las validaciones anteriores (`~/.ssh/authorized_keys`, vía `echo >> fichero`, que
+modifica el inodo existente en lugar de sustituirlo) no sufran este problema.
+
+**Mitigación verificada.** `docker compose restart victim` reinicia `syscheckd` desde cero
+(nuevo escaneo inicial + nuevo *watch*), lo que restablece la detección para el siguiente
+cambio. No existe una vía más ligera verificada: ni una señal (`SIGUSR1` al proceso) ni el
+rescan remoto de la API interna (`agent_control -r`) lo reparan sin reiniciar el agente
+completo.
+
+**El orden importa.** `docker compose restart` no borra `/etc/passwd` — no es un volumen, es
+parte del sistema de ficheros del propio contenedor, que sobrevive al reinicio. Se comprobó
+que ejecutar `userdel -r backdoor01` **después** de reiniciar consume él mismo el único cambio
+detectable tras el arranque, dejando el `useradd` del ataque siguiente sin detectar otra vez
+(reproducido dos veces). El orden correcto, verificado con `scripts/measure_timings.sh 2`
+lanzando el ataque de verdad: `userdel` primero (con el agente aún corriendo), **después**
+`docker compose restart victim`, esperar ~15 s, y entonces atacar. Así el primer cambio que ve
+el `syscheckd` recién arrancado es el del ataque, no el de la limpieza previa.
+
+**No se ha aplicado ningún cambio de configuración** (por ejemplo, forzar `whodata` con
+`auditd` instalado, o pasar estas rutas a `scheduled` con una frecuencia corta) porque ambas
+opciones alteran el mecanismo de detección que describen `docs/architecture.md` y
+`docs/mitre_mapping.md` para el escenario 2, y esta incidencia no impide demostrar el ciclo
+completo una vez — solo su repetición dentro de la misma vida del contenedor. Queda como
+mejora futura si se prioriza la repetibilidad del escenario 2 sobre la fidelidad del mecanismo
+de detección documentado.
+
+**Impacto práctico.** Para el vídeo de la defensa: si el escenario 2 se ensaya más de una vez
+sobre el mismo contenedor `victim`, el segundo intento fallará en silencio — sin alerta, sin
+respuesta, sin ningún mensaje de error que lo delate. `docker compose restart victim` antes de
+cada repetición evita el problema. Añadido a las notas de repetibilidad del README.
+
+**Generalización.** Es la misma familia de riesgo que §7.5 (un mecanismo que deja de funcionar
+sin generar ningún error) y que la advertencia general de §7.1: en FIM basado en `inotify`
+dentro de contenedores, las herramientas que escriben por *rename* atómico son más propensas
+a este fallo silencioso que las que escriben por *append*. Vale la pena tenerlo en cuenta para
+cualquier ruta que se añada al `syscheck` en el futuro (por ejemplo, si se implementa el
+escenario 3b sobre `sshd_config`, que herramientas como `sed -i` también reescriben por
+*rename*).
+
 ---
 
 ## 8. Pruebas pendientes
@@ -677,7 +798,9 @@ lectura ajeno, aunque no cuesten funcionalidad.
 | Escenario 3b (`sshd_config`, regla `100031`) | No ejecutado; requiere un script de simulación específico |
 | CP-05 (listas de exclusión) | Verificado de forma incidental (§7.3), no como caso formal |
 | CP-06 (integridad ante repetición) | Verificado tras la corrección de §7.1, no como caso formal |
-| Medición formal del tiempo de detección | Los tiempos de ejecución están medidos; el cruce con las marcas de tiempo de las alertas está pendiente de una ejecución completa |
+
+La medición formal del tiempo de detección, que figuraba aquí como pendiente, se cerró el
+2026-08-04 con `scripts/measure_timings.sh` (§7.10).
 
 ---
 

@@ -343,6 +343,13 @@ ficheros afectan exclusivamente a su sistema de ficheros.
 - **Contenedores frente a máquinas completas.** Algunos mecanismos de auditoría del núcleo,
   como `whodata` basado en `auditd`, no están plenamente disponibles en contenedores; el FIM
   opera en modo `realtime` mediante notificaciones del sistema de ficheros.
+- **Repetibilidad del escenario 2 dentro de la misma vida del contenedor.** El FIM en tiempo
+  real de `/etc/passwd`/`/etc/group` solo detecta el primer cambio desde que arranca el
+  agente: herramientas como `useradd`/`userdel` reescriben esos ficheros por *rename* atómico,
+  lo que invalida el *watch* de `inotify` y deja el resto de cambios sin detectar hasta
+  reiniciar el agente (`docker compose restart victim`). No afecta a la demostración del ciclo
+  una vez, pero sí a repetirlo sin reiniciar. Investigación y verificación en
+  `docs/validation_plan.md` §7.11.
 
 ---
 

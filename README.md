@@ -73,19 +73,43 @@ comprobaciones (P1-P9) está en
 
 ## Lanzar los ataques
 
+`scripts/measure_timings.sh` (en el host, no dentro de un contenedor) lanza el escenario y
+mide automáticamente tiempo de detección, latencia de despacho y duración de la respuesta,
+cruzando `results/timings.log`, `alerts.json` y `evidence/active_response.log`:
+
 ```bash
 # Escenario 1 — Fuerza bruta SSH (T1110)
-docker compose exec attacker /opt/scripts/ssh_bruteforce_test.sh
+scripts/measure_timings.sh 1
 
 # Escenario 2 — Creación de cuenta local (T1136)
-docker compose exec attacker /opt/scripts/create_user_attack.sh
+scripts/measure_timings.sh 2
 
 # Escenario 3 — Inserción de clave SSH (T1098.004)
-docker compose exec attacker /opt/scripts/add_ssh_key_attack.sh
+scripts/measure_timings.sh 3
 ```
 
-Qué alerta y qué respuesta esperar de cada uno, con los comandos para comprobarlo, está en
-[`docs/validation_plan.md`](docs/validation_plan.md#3-qué-se-espera-por-escenario).
+Cada uno lanza el ataque, espera 10 s a que se propaguen alerta y respuesta, e imprime una
+tabla como:
+
+```
+=== Escenario 3 - Clave SSH no autorizada (T1098.004) ===
+Inicio del ataque:               2026-08-04T12:37:21.544Z
+Alerta generada (100030):        2026-08-04T12:37:21.742+0000
+Respuesta (inicio -> fin):       2026-08-04T12:37:21.744Z -> 2026-08-04T12:37:21.792Z
+---
+Tiempo de deteccion:             0,198 s
+Despacho manager->agente:        0,003 s
+Duracion de la respuesta:        0,048 s
+Tiempo total:                    0,248 s
+```
+
+Si ya has lanzado un ataque a mano y solo quieres medir el último (por ejemplo, con
+`docker compose exec attacker /opt/scripts/ssh_bruteforce_test.sh`), añade `--no-launch`:
+`scripts/measure_timings.sh 1 --no-launch`.
+
+Qué alerta y qué respuesta esperar de cada uno está en
+[`docs/validation_plan.md`](docs/validation_plan.md#3-qué-se-espera-por-escenario), que también
+recoge una tabla de tiempos de referencia obtenida con este mismo script.
 
 Notas de repetibilidad:
 
@@ -96,8 +120,19 @@ Notas de repetibilidad:
   docker compose exec victim iptables -L WAZUH_AR -n            # ver la IP bloqueada
   docker compose exec victim iptables -D WAZUH_AR -s <IP> -j DROP
   ```
-- El escenario 2 falla si `backdoor01` ya existe. Para repetirlo:
-  `docker compose exec victim userdel -r backdoor01`
+- El escenario 2 solo detecta el **primer** cambio en `/etc/passwd`/`/etc/group` desde que
+  arranca el agente: `useradd`/`userdel` reescriben esos ficheros con un patrón de *rename*
+  atómico que invalida el *watch* de `inotify` de la monitorización en tiempo real, y ni un
+  `agent_control -r` (rescan remoto) lo repara — solo un reinicio del agente. Para repetir el
+  escenario 2 de forma fiable, en este orden exacto (el orden importa: `restart` no borra
+  `/etc/passwd`, así que si el `userdel` va después del reinicio, es él quien consume el único
+  cambio detectable, no el ataque):
+  ```bash
+  docker compose exec victim userdel -r backdoor01   # 1. limpiar el usuario, ANTES de reiniciar
+  docker compose restart victim                       # 2. reiniciar para rearmar el watch
+  # esperar ~15 s a que syscheckd termine su arranque antes de atacar de nuevo
+  ```
+  Detalle, investigación y verificación en `docs/validation_plan.md` §7.11.
 - El escenario 3 requiere que el contenido de `authorized_keys` cambie realmente; el FIM no
   genera eventos si el fichero queda idéntico.
 - **No recrees contenedores entre el ataque y la comprobación**: `/home` no es persistente
