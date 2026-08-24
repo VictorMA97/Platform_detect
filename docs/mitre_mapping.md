@@ -166,16 +166,15 @@ la cuenta de un usuario con mayores privilegios. El laboratorio monitoriza igual
 | Aspecto | Detalle |
 |---------|---------|
 | **Fuente de datos ATT&CK** | File: File Modification; Command: Command Execution; Process: Process Creation |
-| **Origen técnico** | Monitorización de integridad sobre `~/.ssh` y `/etc/ssh/sshd_config` |
+| **Origen técnico** | Monitorización de integridad sobre `~/.ssh` |
 | **Mecanismo Wazuh** | Módulo `syscheck` (FIM) en modo `realtime` |
 | **Reglas base** | `550` (fichero modificado), `554` (fichero nuevo) |
-| **Reglas locales** | `100030` (`authorized_keys`), `100031` (`sshd_config`) |
+| **Regla local** | `100030` (`authorized_keys`) |
 
-Se distinguen dos reglas porque los dos ficheros representan vectores diferentes: la
-inserción de una clave establece un acceso adicional, mientras que la alteración de
-`sshd_config` puede modificar las condiciones de acceso del servicio en su conjunto —por
-ejemplo, habilitando la autenticación del superusuario. Separarlas permite priorizar y
-responder de forma diferenciada.
+La regla vigila el fichero de claves autorizadas de la cuenta, cuyo compromiso establece un acceso adicional 
+que no depende de credenciales y, por tanto, sobrevive a la rotación de contraseñas. 
+Si no existe copia de referencia, el script preserva la evidencia y no modifica el fichero, 
+evitando una restauración a ciegas que pudiera degradar el servicio.
 
 Esta técnica es especialmente relevante frente a actores persistentes porque **el acceso
 resultante no depende de credenciales**: la rotación de contraseñas, medida habitual tras

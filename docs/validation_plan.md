@@ -795,7 +795,6 @@ escenario 3b sobre `sshd_config`, que herramientas como `sed -i` también reescr
 
 | Prueba | Motivo |
 |--------|--------|
-| Escenario 3b (`sshd_config`, regla `100031`) | No ejecutado; requiere un script de simulación específico |
 | CP-05 (listas de exclusión) | Verificado de forma incidental (§7.3), no como caso formal |
 | CP-06 (integridad ante repetición) | Verificado tras la corrección de §7.1, no como caso formal |
 
