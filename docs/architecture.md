@@ -43,9 +43,19 @@ virtual, sin dependencias del sistema anfitrión más allá del motor de contene
   └──────────────────────────────────────────────────────────────────────┘
 ```
 
-Sin interfaz web: la consulta de alertas se hace directamente sobre `alerts.json` en el
-manager o contra la API REST del indexer (puerto 9200, publicado al host). Es una decisión
-deliberada — ver §3.2 y §3.10.
+La consulta de alertas del ciclo de detección se hace directamente sobre `alerts.json` en el
+manager o contra la API REST del indexer (puerto 9200, publicado al host): no hay dashboard de
+Wazuh (§3.10). Eso es distinto de la gestión de incidentes: las alertas del laboratorio
+(reglas 100010-100031) se reenvían además a TheHive, que sí tiene interfaz web, para que un
+analista pueda triarlas con contexto:
+
+```
+  wazuh.manager ──alertas del laboratorio──▶ thehive ──analiza artefactos──▶ cortex
+  (integracion custom-w2thive)          host :9000              (+ su propio  host :9001
+                                        (interfaz web)            elasticsearch)
+```
+
+Detalle de esta parte en §3.12.
 
 ### Componentes y responsabilidades
 
@@ -53,9 +63,15 @@ deliberada — ver §3.2 y §3.10.
 |------------|------------------------|
 | `attacker` | Origen controlado de actividad ofensiva. Contiene únicamente cliente SSH y `sshpass`; no incorpora herramientas ofensivas de propósito general, ya que los tres escenarios se reproducen con scripts propios y deterministas. |
 | `victim` | Servidor víctima. Concentra tres funciones que en un entorno real coexisten en la misma máquina: servicio expuesto (`sshd`), telemetría (agente Wazuh con FIM) y capacidad de respuesta (scripts de Active Response). |
-| `wazuh.manager` | Núcleo de detección. Recibe los eventos, los normaliza mediante decoders, los evalúa contra el ruleset y decide qué respuesta ordenar. |
-| `wazuh.indexer` | Persistencia e indexado de alertas (OpenSearch). No participa en la detección ni en la respuesta. Única capa de consulta del laboratorio (§3.10). |
-| `wazuh-certs-generator` | Contenedor de bootstrap de un solo uso. Genera la autoridad de certificación y los certificados TLS de los nodos Wazuh, y finaliza. |
+| `wazuh.manager` | Núcleo de detección. Recibe los eventos, los normaliza mediante decoders, los evalúa contra el ruleset, decide qué respuesta ordenar, y reenvía las alertas del laboratorio a TheHive. |
+| `wazuh.indexer` | Persistencia e indexado de alertas (OpenSearch). No participa en la detección ni en la respuesta. Única capa de consulta del ciclo de detección (§3.10). |
+| `wazuh-certs-generator` | Bootstrap de un solo uso. Genera la autoridad de certificación y los certificados TLS de los nodos Wazuh, y finaliza. Idempotente (§3.8). |
+| `wazuh-certs-permissions` | Bootstrap de un solo uso. Normaliza los permisos del volumen de certificados para que los tres nodos Wazuh, con UID distintos, puedan leerlos (§3.8). |
+| `thehive` | Gestión de incidentes. Recibe como alertas propias las alertas del laboratorio y las presenta con contexto (regla, agente, técnica MITRE, log completo) para que un analista las triage. |
+| `cortex` | Análisis de artefactos bajo demanda de TheHive (ejecuta analizadores como contenedores Docker efímeros). |
+| `cortex-elasticsearch` | Almacenamiento de organizaciones, usuarios, trabajos y resultados de Cortex. Independiente del indexer de Wazuh (productos distintos, sin compatibilidad garantizada entre versiones). |
+| `thehive-volume-permissions` | Bootstrap de un solo uso. Normaliza a UID/GID 1000 los volúmenes de TheHive, creados por Docker como `root` (§3.12, `docs/validation_plan.md` §7.12). |
+| `thehive-wazuh-bootstrap` | Bootstrap de un solo uso. Crea en TheHive la organización y el usuario de la integración Wazuh→TheHive y genera su clave API automáticamente (§3.12). |
 
 ---
 
@@ -122,8 +138,8 @@ tres propiedades relevantes:
   cada escenario sea repetible en condiciones idénticas.
 
 Se descartó una plataforma de orquestación como Kubernetes por desproporción respecto al
-alcance: introduce complejidad operativa que no aporta valor demostrativo a un entorno de
-cinco contenedores en una sola máquina.
+alcance: introduce complejidad operativa que no aporta valor demostrativo a un entorno de un
+puñado de contenedores en una sola máquina.
 
 ### 3.2 Wazuh como plataforma SIEM/EDR
 
@@ -305,6 +321,62 @@ Filebeat pese a no persistir su configuración (`filebeat_etc`), que se regenera
 arranque desde la plantilla y las variables de entorno. Detalle y hallazgos en
 `docs/validation_plan.md` §7.8.
 
+### 3.12 Integración con TheHive + Cortex
+
+El enunciado del TFM pide explícitamente un componente de "notificaciones enriquecidas a un
+hipotético analista de SOC" y recomienda TheHive+Cortex para gestión de incidentes y análisis
+de artefactos. Se añadió con tres decisiones deliberadas que se apartan, en distinto grado, de
+la instalación de referencia de TheHive/Cortex.
+
+**Stack mínimo, no el de producción.** TheHive 5 (la versión actual) exige Cassandra +
+Elasticsearch + MinIO + un proxy Nginx con certificados propios — desproporcionado para esta
+prueba de concepto y contrario a la reproducibilidad mínima que persigue todo el laboratorio.
+Se usa en su lugar **TheHive 4** con almacenamiento embebido (BerkeleyDB + índice Lucene local,
+sin Cassandra ni MinIO) y **Cortex 3**, siguiendo la plantilla oficial mínima de
+`TheHive-Project/Docker-Templates` (`thehive4-berkleydb-cortex31`). Cortex necesita su propio
+Elasticsearch para sus trabajos y resultados; no se comparte con el indexer de Wazuh —son
+productos distintos, sin compatibilidad de versión garantizada— así que es un servicio más
+(`cortex-elasticsearch`), con heap mínimo (256 MB) igual que el resto de instancias auxiliares
+del laboratorio.
+
+**El socket de Docker montado en `cortex`.** Cortex ejecuta cada análisis como un contenedor
+Docker efímero (imagen oficial del analizador correspondiente), lo que exige montar
+`/var/run/docker.sock` dentro del propio contenedor `cortex` — acceso equivalente a root sobre
+el Docker del host. Es el único servicio de todo el laboratorio con ese nivel de privilegio,
+en contraste deliberado con el resto (donde se evitó `--privileged` y se acotaron las
+capacidades al mínimo, p. ej. `NET_ADMIN`/`NET_RAW` solo en `victim`, §3.5). Es también cómo
+funciona Cortex en cualquier despliegue, no una elección de este laboratorio; el analizador
+concreto habilitado (`FileInfo`) es estático, sin claves API externas, y no ejecuta nada contra
+la red del laboratorio.
+
+**Integración Wazuh→TheHive automatizada; enlace Cortex↔TheHive manual.** Estas dos partes
+tienen un tratamiento distinto porque su superficie de automatización es distinta:
+
+- TheHive expone una API REST v1 estable y documentada
+  (`TheHive-Project/api-docs`) para crear organizaciones, usuarios y claves API. El bootstrap
+  (`thehive-cortex/bootstrap/create_wazuh_api_key.sh`) la usa para crear una organización y un
+  usuario dedicados a la integración y generar su clave, sin intervención humana. El bloque
+  `<integration>` de `wazuh_manager.conf` reenvía como alerta de TheHive las alertas de las
+  reglas del laboratorio (100010-100031), usando solo la biblioteca estándar de Python
+  (`config/wazuh_cluster/integrations/custom-w2thive.py`) porque la imagen oficial de
+  `wazuh.manager` no permite instalar dependencias sin un Dockerfile propio. Verificado en vivo
+  para los tres escenarios — detalle en `docs/validation_plan.md` §7.12.
+- El enlace Cortex↔TheHive (organización + usuario + clave API *dentro de Cortex*, pegada
+  después en `application.conf` de TheHive) **no** tiene una vía de API equivalente y
+  documentada: es un paso manual por diseño en todo el ecosistema TheHive/Cortex, no un
+  descuido de este laboratorio — la propia plantilla oficial mínima lo resuelve a golpe de
+  clic en la interfaz web, y existe una petición de automatizarlo abierta en el repositorio
+  oficial de TheHive desde 2018, nunca implementada, con el repositorio ya archivado. Se deja
+  como paso manual documentado en el README, igual que se documentó cualquier otra limitación
+  real de este tipo (p. ej. `whodata`/`auditd` en §5).
+
+**Permisos de UID, otra vez.** El despliegue reveló tres fallos reales de UID/permisos
+(volúmenes de TheHive creados como `root` pero consumidos por UID 1000; un directorio
+bind-mount sin permiso de escritura para el UID del contenedor de bootstrap; un `chmod` sobre
+un fichero ajeno que abortaba el script después de haber tenido éxito) — la misma familia de
+problema que ya apareció con los certificados de Wazuh al principio del proyecto. Investigación,
+corrección y verificación completas en `docs/validation_plan.md` §7.12.
+
 ---
 
 ## 4. Consideraciones de seguridad del entorno
@@ -320,10 +392,12 @@ y acotadas:
 | Certificados con lectura universal | Los procesos de los contenedores usan UID distintos | Certificados autofirmados sin valor fuera del entorno |
 | `sudo` sin contraseña | El ataque automatizado necesita `sudo -n` | Acotado a cuatro binarios de gestión de cuentas |
 | Credenciales en texto plano | Reproducibilidad de la prueba | Ficticias y sin correspondencia con sistema real alguno |
+| `/var/run/docker.sock` montado en `cortex` | Cortex ejecuta analizadores como contenedores Docker efímeros (§3.12) | Acceso equivalente a root sobre el Docker del host; único servicio del laboratorio con este privilegio, analizador habilitado sin claves API externas |
 
 Ninguna acción automática actúa sobre el sistema anfitrión: los bloqueos se aplican dentro
 del espacio de nombres de red del contenedor víctima y las modificaciones de cuentas y
-ficheros afectan exclusivamente a su sistema de ficheros.
+ficheros afectan exclusivamente a su sistema de ficheros. La única excepción deliberada es el
+socket de Docker de `cortex`, justificada arriba.
 
 ---
 
@@ -350,6 +424,10 @@ ficheros afectan exclusivamente a su sistema de ficheros.
   reiniciar el agente (`docker compose restart victim`). No afecta a la demostración del ciclo
   una vez, pero sí a repetirlo sin reiniciar. Investigación y verificación en
   `docs/validation_plan.md` §7.11.
+- **Enlace Cortex↔TheHive manual.** El análisis de artefactos con Cortex (analizador
+  `FileInfo`) no queda demostrado hasta completar el paso manual de un solo uso documentado en
+  el README — limitación conocida del propio ecosistema TheHive/Cortex, no automatizable con
+  una API estable (§3.12). La integración Wazuh→TheHive sí está automatizada y verificada.
 
 ---
 

@@ -4,6 +4,8 @@ evidence/*
 !evidence/.gitkeep
 results/*
 !results/.gitkeep
+thehive-cortex/shared/*
+!thehive-cortex/shared/.gitkeep
 
 # Common secret and certificate files
 *.pem

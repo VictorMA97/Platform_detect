@@ -16,7 +16,7 @@ de Wazuh implicadas y las respuestas automáticas asociadas.
 |---|---------|-----|---------|-------------|----------------------|
 | 1 | Brute Force: Password Guessing | T1110.001 | Credential Access | `100010` | `block_ip.sh` |
 | 2 | Create Account: Local Account | T1136.001 | Persistence | `100020` | `disable_suspicious_user.sh` |
-| 3 | Account Manipulation: SSH Authorized Keys | T1098.004 | Persistence, Privilege Escalation | `100030` | `preserve_and_restore_file.sh` |
+| 3 | Account Manipulation: SSH Authorized Keys | T1098.004 | Persistence, Privilege Escalation | `100030` (`100031` para `sshd_config`, pendiente) | `preserve_and_restore_file.sh` |
 
 Los tres escenarios reproducen una secuencia coherente dentro de una intrusión: obtención de
 acceso mediante credenciales, establecimiento de persistencia por cuenta propia y
@@ -169,7 +169,7 @@ la cuenta de un usuario con mayores privilegios. El laboratorio monitoriza igual
 | **Origen técnico** | Monitorización de integridad sobre `~/.ssh` |
 | **Mecanismo Wazuh** | Módulo `syscheck` (FIM) en modo `realtime` |
 | **Reglas base** | `550` (fichero modificado), `554` (fichero nuevo) |
-| **Regla local** | `100030` (`authorized_keys`) |
+| **Regla local** | `100030` (`authorized_keys`); `100031` (`/etc/ssh/sshd_config`, mismo mecanismo de detección — variante 3b, pendiente de script de simulación dedicado, ver `docs/validation_plan.md` §3.3 y §8) |
 
 La regla vigila el fichero de claves autorizadas de la cuenta, cuyo compromiso establece un acceso adicional 
 que no depende de credenciales y, por tanto, sobrevive a la rotación de contraseñas. 

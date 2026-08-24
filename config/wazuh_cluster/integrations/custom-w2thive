@@ -1,0 +1,6 @@
+#!/bin/sh
+# Wrapper exigido por la convencion de integraciones personalizadas de
+# Wazuh: wazuh-integratord invoca un ejecutable con el mismo nombre que
+# <name> en el bloque <integration> de ossec.conf. Este delega en el
+# script Python real usando el interprete embebido del propio Wazuh.
+exec /var/ossec/framework/python/bin/python3 /var/ossec/integrations/custom-w2thive.py "$@"

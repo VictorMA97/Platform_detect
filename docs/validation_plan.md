@@ -789,6 +789,173 @@ cualquier ruta que se añada al `syscheck` en el futuro (por ejemplo, si se impl
 escenario 3b sobre `sshd_config`, que herramientas como `sed -i` también reescriben por
 *rename*).
 
+### 7.12 Integración con TheHive + Cortex (gestión de incidentes y análisis de artefactos)
+
+**Motivación.** El enunciado del TFM pide explícitamente un componente de "notificaciones
+enriquecidas a un hipotético analista de SOC" y recomienda TheHive+Cortex para gestión de
+incidentes y análisis de artefactos — ausentes hasta ahora del laboratorio (ver análisis de
+cumplimiento previo). Se añadió un stack mínimo (TheHive 4 con almacenamiento embebido
+BerkeleyDB+Lucene, sin Cassandra/MinIO; Cortex 3 con su propio Elasticsearch) y una
+integración nativa Wazuh→TheHive (bloque `<integration>` en `wazuh_manager.conf`) que reenvía
+como alerta de TheHive las alertas de las reglas locales del laboratorio (100010-100031).
+Detalle de la arquitectura y las decisiones en `docs/architecture.md`.
+
+Esta sección documenta tres fallos reales encontrados y corregidos durante el despliegue —
+ninguno hipotético, los tres bloqueaban el arranque o la integración por completo hasta
+solucionarlos.
+
+**Fallo 1 — `AccessDeniedException` al arrancar TheHive.** El contenedor `thehive` entraba en
+bucle de reinicio: `java.nio.file.AccessDeniedException: /opt/thp/thehive/db/je.properties`.
+Causa: los volúmenes con nombre (`thehive-db`, `thehive-index`, `thehive-data`) los crea
+Docker como `root`, pero el proceso de TheHive corre como UID/GID 1000 (usuario `thehive` de
+la imagen, confirmado con `docker run --rm --entrypoint id thehiveproject/thehive4:4.1.24-1`).
+Es la misma familia de problema que los certificados del indexer de Wazuh al principio del
+proyecto. **Corrección**: nuevo servicio de un solo uso `thehive-volume-permissions`
+(`chown -R 1000:1000` sobre los tres volúmenes), con `thehive` esperando a que termine vía
+`depends_on: condition: service_completed_successfully` — mismo patrón que
+`wazuh-certs-permissions`. **Verificado**: tras el fix, `thehive` arranca y queda estable
+(`Play application started`).
+
+**Fallo 2 — el propio script de bootstrap abortaba después de haber tenido éxito.** El
+contenedor `thehive-wazuh-bootstrap` (genera la clave API que usa la integración) terminaba
+con `Exited (1)` incluso cuando la clave se había generado y escrito correctamente. Causas,
+en dos capas:
+
+1. El directorio `thehive-cortex/shared/` (bind mount) estaba a `755`, propiedad de
+   `riku` (UID 1000 en el host); la imagen `curlimages/curl` corre como `curl_user` (UID
+   **100**, *distinto* del UID 1000 de TheHive), sin permiso de escritura como "otros".
+2. Corregido eso, un segundo fallo: el propio script hacía `chmod 644` sobre el fichero de
+   clave *después* de escribirlo. Como el fichero placeholder ya existía y pertenecía a
+   `riku`, no a `curl_user`, ese `chmod` fallaba con `Operation not permitted` — y con
+   `set -e` activo, abortaba el script con código 1 **después** de que la clave ya se hubiera
+   guardado bien. El síntoma (`Exited (1)`) sugería un fallo total; en realidad el trabajo
+   útil ya estaba hecho.
+
+**Corrección**: permisos del directorio ampliados (`chmod 777` sobre `thehive-cortex/shared/`,
+`chmod 666` sobre el placeholder ya existente) y eliminada la línea `chmod` innecesaria del
+script — los permisos se fijan una vez al crear el fichero, no hace falta re-fijarlos en cada
+ejecución del bootstrap. **Verificado**: `thehive-wazuh-bootstrap` termina con `Exited (0)` y
+el fichero contiene una clave válida.
+
+**Fallo 3 — `403 AuthorizationError` al reenviar la primera alerta real.** Con la clave ya
+generada para `admin@thehive.local` (el superadministrador del sistema), el primer intento
+real de reenvío de una alerta devolvió `{"type":"AuthorizationError","message":"Operation not
+permitted"}`. Causa: en TheHive, el superadministrador pertenece a la organización especial
+`admin` (gestión del sistema), que **no** tiene permiso para crear alertas de caso — esa
+capacidad requiere un usuario con perfil `org-admin` (o similar) dentro de una organización de
+trabajo normal. No es una particularidad de este laboratorio: la propia plantilla oficial
+mínima de TheHive+Cortex (`TheHive-Project/Docker-Templates`) instruye a crear una
+organización y un usuario dedicados a mano por el mismo motivo.
+
+**Corrección**: el bootstrap crea también, vía la API v1 documentada de TheHive
+(`POST /api/v1/organisation`, `POST /api/v1/user` con `"profile":"org-admin"`), una
+organización `tfm-apt-lab` y un usuario `wazuh@thehive.local` dentro de ella, y genera la
+clave API de **ese** usuario en vez de la del superadministrador. Idempotente: si la
+organización o el usuario ya existen (ejecuciones repetidas del bootstrap), la API devuelve un
+error que el script registra como aviso y del que continúa sin abortar.
+
+**Verificación end-to-end (2026-08-24).** Con las tres correcciones aplicadas, los tres
+escenarios reenviaron su alerta a TheHive con éxito, confirmado consultando la API de TheHive
+directamente (`listAlert`), no solo el log del lado de Wazuh:
+
+| Escenario | Regla | `integrations.log` | Confirmado en TheHive |
+|---|---|---|---|
+| 2 — Cuenta local | 100020 | 2× `HTTP 201` (18:21:09) | 2 alertas, título `TFM-LAB [100020] TFM-LAB: Cambio en /etc/passwd o /etc/group...`, MITRE `T1136`, `full_log` con el diff real del fichero |
+| 3 — Clave SSH | 100030 | 2× `HTTP 201` (18:25:40) | Confirmado por log; formato identico al anterior |
+| 1 — Fuerza bruta SSH | 100010 | 1× `HTTP 201` (18:26:59) | Confirmado por log |
+
+**Impacto en el cumplimiento del enunciado.** Cierra el hueco de "notificaciones enriquecidas
+a un analista de SOC" — cada alerta del laboratorio llega a TheHive con descripción en
+markdown (regla, agente, grupos, técnica MITRE, log completo), etiquetas y severidad, lista
+para que un analista la triage.
+
+**Enlace Cortex↔TheHive y analizador `FileInfo` — verificado (2026-08-24).** Al completar el
+paso manual (README, sección "Gestión de incidentes"), un primer intento generó una clave de
+API que pertenecía al superadmin del sistema (organización `cortex`, creada automáticamente al
+inicializar la base de datos) en vez de a un usuario de una organización de trabajo — mismo
+patrón de fondo que el Fallo 3 de esta misma sección, pero en el lado de Cortex: el superadmin
+gestiona la instancia, no puede ejecutar analizadores. Verificado por API
+(`GET /api/analyzer` con esa clave devolvía `AuthorizationError`). Corregido creando una
+organización de trabajo (`TFM`) y un usuario dentro de ella con roles `read`, `analyze` y
+**`orgadmin`** — este último imprescindible: sin él, la opción de habilitar analizadores no
+aparece en la interfaz para nadie, ni siquiera para el superadmin gestionando esa organización
+desde fuera. Con la clave de ese usuario y `FileInfo` habilitado, verificado extremo a extremo
+por API:
+
+```
+GET /api/analyzer (Cortex, con la clave del usuario de la organizacion)
+  -> FileInfo_8_0 habilitado para la organizacion TFM
+
+GET /api/connector/cortex/analyzer/type/file (TheHive, con la clave de wazuh@thehive.local)
+  -> FileInfo_8_0 visible como analizador disponible para observables de tipo 'file'
+```
+
+Cierra el último pendiente de §8 para este componente.
+
+**Generalización.** Los tres fallos comparten un patrón ya visto varias veces en este
+documento: un desajuste de UID entre lo que crea un recurso (Docker, o quien prepara un
+fichero en el host) y lo que lo consume (el proceso de la aplicación). Merece la pena, para
+cualquier servicio nuevo que se añada al laboratorio, comprobar desde el principio con qué UID
+corre su imagen oficial, en vez de descubrirlo por el camino largo de un `AccessDeniedException`.
+
+### 7.13 Secreto de Cortex por debajo del mínimo de entropía exigido por Play (HS256)
+
+**Síntoma.** El contenedor `cortex` entraba en bucle de reinicio con `Oops, cannot start the
+server` y este error de configuración de Play Framework:
+
+```
+The application secret is too short and does not have the recommended amount of entropy
+for algorithm HS256 [...]. Current application secret bits: 248, minimal required bits: 256.
+```
+
+248 bits coincide exactamente con los 31 caracteres ASCII (31 × 8) del literal de reserva que
+`thehive-cortex/cortex/application.conf` fijaba para `play.http.secret.key`. El fichero tenía
+dos líneas para esa clave:
+
+```hocon
+play.http.secret.key = "lab-cortex-secret-2026-fallback"   # 31 caracteres = 248 bits
+play.http.secret.key = ${?CORTEX_SECRET}                    # opcional: sustituye si la variable existe
+```
+
+**Causa raíz.** La variable de entorno `CORTEX_SECRET` (36 caracteres, 288 bits, definida en
+`.env` y pasada al contenedor vía `environment:` en `docker-compose.yml`) nunca llegó a
+sustituir el `${?CORTEX_SECRET}` dentro del proceso de Cortex. Con la sintaxis `${?VAR}` de
+HOCON, si la variable no se resuelve la asignación se omite sin más — sin error — y queda en
+pie la línea anterior, el literal corto. El resultado fue el mismo tanto pasando el secreto por
+variable de entorno como probando la vía nativa del propio `entrypoint` de la imagen
+(`command: ["--secret", "${CORTEX_SECRET}"]`), lo que descarta que el problema estuviera en
+*cómo* se le pasaba el valor al contenedor y lo sitúa en la resolución de `${?CORTEX_SECRET}`
+dentro del proceso Java en sí — probablemente relacionado con cómo el `entrypoint` de la imagen
+cambia de usuario (`su -m cortex -c "..."`) antes de lanzar Cortex, aunque no se aisló el
+mecanismo exacto: no merecía la pena seguir instrumentando algo que tiene una solución mucho
+más simple y robusta (ver corrección).
+
+**Corrección.** Se sustituyeron las dos líneas por una única asignación con un literal fijo de
+36 caracteres (288 bits, mismo valor que `CORTEX_SECRET` en `.env`), sin ninguna dependencia de
+sustitución de variable de entorno:
+
+```hocon
+play.http.secret.key = "Lab-Cortex-Secret-2026-Ficticio-POC"
+```
+
+Se mantuvo `command: ["--secret", "${CORTEX_SECRET}"]` en `docker-compose.yml` como red de
+seguridad adicional (vía nativa del `entrypoint`, no hace daño si de todos modos gana el
+literal del `application.conf`), pero la corrección real no depende de que esa vía funcione.
+
+**Verificado (2026-08-24).** Tras el cambio, `cortex` arranca sin el error de entropía: Play
+inicia el servidor HTTP y responde en `/api/status`, `/api/user/current`, etc. Los errores que
+siguen apareciendo en el log en ese punto (`index_not_found_exception` sobre `cortex_N`,
+`Authentication using API key is not supported` con la clave `PENDIENTE_DE_CONFIGURACION_MANUAL`)
+son el estado esperado **antes** de completar la configuración manual de Cortex — ver README,
+sección "Gestión de incidentes" — no síntomas de este bug.
+
+**Generalización.** Cuando una sustitución de variable de entorno en HOCON (`${?VAR}`) no hace
+lo que se espera, no lanza ningún error: la asignación simplemente desaparece y gana lo que
+esté escrito justo antes en el fichero. Para un valor crítico para el arranque (como un secreto
+de sesión), es más robusto fijar un literal suficientemente largo directamente que encadenar un
+fallback corto pensado para "nunca ganar" — si la sustitución falla por cualquier motivo, ese
+fallback sí gana, silenciosamente.
+
 ---
 
 ## 8. Pruebas pendientes
@@ -799,7 +966,10 @@ escenario 3b sobre `sshd_config`, que herramientas como `sed -i` también reescr
 | CP-06 (integridad ante repetición) | Verificado tras la corrección de §7.1, no como caso formal |
 
 La medición formal del tiempo de detección, que figuraba aquí como pendiente, se cerró el
-2026-08-04 con `scripts/measure_timings.sh` (§7.10).
+2026-08-04 con `scripts/measure_timings.sh` (§7.10). La integración Wazuh→TheHive, que no
+figuraba aquí porque no existía, se implementó y verificó el 2026-08-24 (§7.12). El enlace
+Cortex↔TheHive y el analizador `FileInfo`, que figuraban aquí como pendientes, se completaron y
+verificaron el mismo día (§7.12, adenda).
 
 ---
 
@@ -814,3 +984,4 @@ La medición formal del tiempo de detección, que figuraba aquí como pendiente,
 | C5 | Toda respuesta es reversible | Cumplido. La reversión automática de escenario 1 falló en la primera prueba, se diagnosticó (§7.5) y quedó verificada tras corregir `block_ip.sh` |
 | C6 | Ninguna acción automática afecta al sistema anfitrión | Cumplido |
 | C7 | El entorno se despliega sin intervención manual sobre contenedores | Cumplido — verificado el 2026-07-27 (§6.2) y de nuevo tras las correcciones de §7.6 |
+| C8 | Las alertas del laboratorio llegan a una herramienta de gestión de incidentes con contexto suficiente para un analista | Cumplido — verificado el 2026-08-24 (§7.12) para los tres escenarios, incluido el enlace con Cortex y el analizador `FileInfo` para análisis de artefactos |

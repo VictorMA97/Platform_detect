@@ -81,6 +81,9 @@ services:
       - ./config/wazuh_indexer_ssl_certs/wazuh.manager-key.pem:/etc/ssl/filebeat.key
       - ./config/wazuh_cluster/wazuh_manager.conf:/wazuh-config-mount/etc/ossec.conf
       - ./config/wazuh_cluster/local_rules.xml:/var/ossec/etc/rules/local_rules.xml
+      - ./config/wazuh_cluster/integrations/custom-w2thive:/var/ossec/integrations/custom-w2thive:ro
+      - ./config/wazuh_cluster/integrations/custom-w2thive.py:/var/ossec/integrations/custom-w2thive.py:ro
+      - ./thehive-cortex/shared:/var/ossec/integrations/shared:ro
 
   wazuh.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_STACK_VERSION:?falta WAZUH_STACK_VERSION en .env}
@@ -157,6 +160,127 @@ services:
     volumes:
       - ./results:/opt/results
 
+  # --- TheHive + Cortex: gestion de incidentes y analisis de artefactos ---
+  # Stack deliberadamente minimo (TheHive con almacenamiento embebido
+  # BerkeleyDB+Lucene, sin Cassandra/MinIO) frente al despliegue de
+  # produccion de TheHive 5. Justificacion en docs/architecture.md.
+
+  cortex-elasticsearch:
+    image: elasticsearch:${CORTEX_ELASTICSEARCH_VERSION:?falta CORTEX_ELASTICSEARCH_VERSION en .env}
+    hostname: cortex-elasticsearch
+    restart: always
+    networks:
+      - wazuh-network
+    environment:
+      - http.host=0.0.0.0
+      - discovery.type=single-node
+      - cluster.name=cortex
+      - script.allowed_types=inline
+      - thread_pool.search.queue_size=100000
+      - thread_pool.write.queue_size=10000
+      - xpack.security.enabled=false
+      - bootstrap.memory_lock=true
+      - ES_JAVA_OPTS=-Xms256m -Xmx256m
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - cortex-elasticsearch-data:/usr/share/elasticsearch/data
+
+  # Ejecuta analizadores como contenedores Docker efimeros: requiere el
+  # socket de Docker del host. Es el unico servicio del laboratorio con
+  # ese privilegio; justificacion y alcance en docs/architecture.md.
+  cortex:
+    image: thehiveproject/cortex:${CORTEX_VERSION:?falta CORTEX_VERSION en .env}
+    hostname: cortex
+    restart: always
+    depends_on:
+      - cortex-elasticsearch
+    networks:
+      - wazuh-network
+    environment:
+      - CORTEX_SECRET=${CORTEX_SECRET:?falta CORTEX_SECRET en .env}
+      # Cortex construye siempre un cliente de Kubernetes al arrancar (aunque
+      # solo se use el runner 'docker'), y sin estas variables intenta
+      # resolver por DNS 'kubernetes.default.svc' -- que no existe fuera de
+      # un cluster real y tira todo el arranque con UnknownHostException.
+      # Con estas variables el cliente usa esta direccion directamente, sin
+      # DNS, y falla rapido con 'conexion rechazada' en vez de colgarse.
+      - KUBERNETES_SERVICE_HOST=127.0.0.1
+      - KUBERNETES_SERVICE_PORT=443
+      - JOB_DIRECTORY=/tmp/cortex-jobs
+    extra_hosts:
+      - "kubernetes.default.svc:127.0.0.1"
+    volumes:
+      - ./thehive-cortex/cortex/application.conf:/etc/cortex/application.conf:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/cortex-jobs:/tmp/cortex-jobs
+    ports:
+      - "9001:9001"
+    # --secret es la via nativa del entrypoint de la imagen para fijar el
+    # secreto (independiente de si ${?CORTEX_SECRET} llega o no al proceso
+    # de Cortex via variable de entorno -- ver el comentario en
+    # thehive-cortex/cortex/application.conf, que ya trae un secreto fijo
+    # de sobra largo como red de seguridad).
+    command: ["--secret", "${CORTEX_SECRET:?falta CORTEX_SECRET en .env}", "--job-directory", "/tmp/cortex-jobs"]
+
+  # Normaliza el dueno de los volumenes de TheHive: Docker los crea como
+  # root, pero el proceso de thehive corre como UID/GID 1000 (usuario
+  # 'thehive' de la imagen) y no puede escribir en ellos sin esto.
+  # Mismo patron que wazuh-certs-permissions.
+  thehive-volume-permissions:
+    image: alpine:3.20
+    networks:
+      - wazuh-network
+    volumes:
+      - thehive-db:/opt/thp/thehive/db
+      - thehive-index:/opt/thp/thehive/index
+      - thehive-data:/opt/thp/thehive/data
+    entrypoint: ["sh", "-c", "chown -R 1000:1000 /opt/thp/thehive/db /opt/thp/thehive/index /opt/thp/thehive/data"]
+
+  thehive:
+    image: thehiveproject/thehive4:${THEHIVE_VERSION:?falta THEHIVE_VERSION en .env}
+    hostname: thehive
+    restart: always
+    depends_on:
+      cortex:
+        condition: service_started
+      thehive-volume-permissions:
+        condition: service_completed_successfully
+    networks:
+      - wazuh-network
+    environment:
+      - THEHIVE_SECRET=${THEHIVE_SECRET:?falta THEHIVE_SECRET en .env}
+    volumes:
+      - ./thehive-cortex/thehive/application.conf:/etc/thehive/application.conf:ro
+      - thehive-db:/opt/thp/thehive/db
+      - thehive-index:/opt/thp/thehive/index
+      - thehive-data:/opt/thp/thehive/data
+    command: --no-config --no-config-secret
+    ports:
+      - "9000:9000"
+
+  # Bootstrap de un solo uso: genera una clave API en TheHive para que la
+  # integracion Wazuh->TheHive (custom-w2thive) pueda autenticarse sin
+  # intervencion manual. No bloquea el resto del laboratorio (sin
+  # depends_on desde wazuh.manager): si tarda o falla, la integracion
+  # queda inactiva hasta que la clave aparezca, pero el ciclo
+  # ataque->alerta->respuesta->evidencia no depende de ella.
+  thehive-wazuh-bootstrap:
+    image: curlimages/curl:8.10.1
+    networks:
+      - wazuh-network
+    depends_on:
+      - thehive
+    volumes:
+      - ./thehive-cortex/bootstrap/create_wazuh_api_key.sh:/create_wazuh_api_key.sh:ro
+      - ./thehive-cortex/shared:/shared
+    entrypoint: ["sh", "/create_wazuh_api_key.sh"]
+
 networks:
   wazuh-network:
     driver: bridge
@@ -169,3 +293,7 @@ volumes:
   wazuh_queue:
   filebeat_var:
   wazuh-indexer-data:
+  cortex-elasticsearch-data:
+  thehive-db:
+  thehive-index:
+  thehive-data:
