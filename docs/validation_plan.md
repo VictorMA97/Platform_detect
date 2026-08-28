@@ -890,7 +890,13 @@ GET /api/connector/cortex/analyzer/type/file (TheHive, con la clave de wazuh@the
   -> FileInfo_8_0 visible como analizador disponible para observables de tipo 'file'
 ```
 
-Cierra el último pendiente de §8 para este componente.
+Con la conexión y los permisos verificados, un análisis real (relanzando el escenario 3 desde
+cero y llevando su alerta hasta un informe de `FileInfo`) reveló un problema distinto en la
+propia ejecución de los analizadores, ya en Cortex — corregido y verificado en §7.14. Con esa
+corrección aplicada, el flujo completo quedó verificado de punta a punta el 2026-08-25: ataque →
+alerta Wazuh → respuesta automática → evidencia → alerta en TheHive → caso → observable →
+análisis con `FileInfo` en Cortex con informe real (detalle en §7.14). Cierra el último
+pendiente de §8 para este componente.
 
 **Generalización.** Los tres fallos comparten un patrón ya visto varias veces en este
 documento: un desajuste de UID entre lo que crea un recurso (Docker, o quien prepara un
@@ -956,6 +962,163 @@ de sesión), es más robusto fijar un literal suficientemente largo directamente
 fallback corto pensado para "nunca ganar" — si la sustitución falla por cualquier motivo, ese
 fallback sí gana, silenciosamente.
 
+### 7.14 Los analizadores de Cortex fallaban al arrancar: "Docker fuera de Docker" mal configurado
+
+**Síntoma.** Con el enlace Cortex↔TheHive ya correctamente configurado (§7.12, adenda), el
+primer análisis real con `FileInfo` sobre una evidencia terminaba en `Failure`. Dos síntomas
+distintos, en dos intentos:
+
+1. Con el contenedor del analizador tardando ~2,5 minutos en fallar (compatible con la primera
+   descarga de su imagen), el error era un traceback de Python:
+   `json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)` al leer `stdin`.
+2. Tras un primer intento de corrección, el fallo pasó a ser casi instantáneo (~7 s), con
+   `errorMessage` igual a una ruta sin más contexto:
+   `/tmp/cortex-jobs/cortex-job-IknPOKABCrIAaC6oFEpt-2297875958634964880`.
+
+**Causa raíz.** Cortex corre él mismo como contenedor, pero lanza cada analizador como un
+contenedor **hermano** a través del socket de Docker del host montado en el servicio (`docs/architecture.md`
+§3.12). Para pasarle el trabajo a analizar, Cortex escribe `input.json` en un directorio y le
+pide al **daemon del host** que monte esa misma ruta dentro del contenedor del analizador en
+`/job` (confirmado leyendo el código fuente de Cortex 3.2.1:
+`app/org/thp/cortex/services/DockerJobRunnerSrv.scala` y `.../util/docker/DockerClient.scala`,
+y `cortexutils/worker.py`, que hace `json.load(sys.stdin)` como *fallback* solo si
+`/job/input/input.json` no existe). El daemon del host resuelve esa ruta contra el filesystem
+**real del host**, no contra el del propio contenedor de Cortex — así que, para que funcione,
+la ruta tiene que existir, con el mismo contenido, en ambos sitios. Esto ocurrió en dos capas:
+
+1. `job.directory` no estaba fijado en `application.conf` (Cortex usaba su valor por defecto,
+   `${java.io.tmpdir}` = `/tmp` directamente), así que el volumen que ya existía en
+   `docker-compose.yml` (`/tmp/cortex-jobs:/tmp/cortex-jobs`, heredado sin usar del commit
+   inicial) no cubría la ruta real que Cortex empleaba. Confirmado comparando con el
+   `docker-compose.yml` oficial del propio proyecto Cortex (rama `3.2.1`), que monta
+   `${job_directory}:${job_directory}` — la misma ruta a los dos lados — y la referencia en el
+   `reference.conf` de Cortex (`job.directory`, `job.dockerDirectory = ${job.directory}`).
+2. Corregido eso (`job.directory = "/tmp/cortex-jobs"` en `application.conf`), Docker había
+   creado `/tmp/cortex-jobs` como `root:root` con permisos `0755` al montarlo por primera vez
+   (es un *bind mount* de host, no un volumen con nombre) — pero Cortex corre como UID/GID
+   **1001** (visible en su log de arranque: `Using user 1001 and group 1001`) y no tenía
+   permiso de escritura para crear ahí el subdirectorio de cada trabajo. El mensaje de la
+   excepción de Java (`AccessDeniedException`/`NoSuchFileException`) es solo la ruta, sin
+   ninguna palabra sobre permisos, lo que lo hace fácil de confundir con otra cosa.
+
+**Corrección.** Dos cambios, ambos en el laboratorio (no en la imagen oficial):
+
+- `thehive-cortex/cortex/application.conf`: `job.directory = "/tmp/cortex-jobs"`, fijando
+  explícitamente la misma ruta que ya se montaba (sin usar) en `docker-compose.yml`.
+- `docker-compose.yml`: nuevo servicio de un solo uso `cortex-jobs-permissions`
+  (`chown -R 1001:1001 /tmp/cortex-jobs`), con `cortex` esperando a que termine vía
+  `depends_on: condition: service_completed_successfully` — mismo patrón que
+  `thehive-volume-permissions` y `wazuh-certs-permissions`. De paso se retiraron
+  `JOB_DIRECTORY` (variable de entorno) y `--job-directory` (argumento de `command`) que
+  también venían del commit inicial sin hacer nada: ninguno de los dos es una clave o *flag*
+  real del `entrypoint` de Cortex, y su presencia sugería (incorrectamente) que el directorio
+  de trabajo ya estaba resuelto.
+
+**Verificado (2026-08-25).** Con las dos correcciones aplicadas, un análisis real de `FileInfo`
+sobre la evidencia del escenario 3 (el `authorized_keys` preservado por `preserve_restore.sh`)
+terminó en `Success` en 6 segundos, con un informe completo y coherente con la evidencia real:
+hashes MD5/SHA1/SHA256 idénticos a los registrados en `evidence/active_response.log` para ese
+mismo fichero, `MimeType: text/plain; charset=us-ascii`, `Filetype: TXT`. Cierra de forma
+definitiva el flujo completo: ataque → alerta Wazuh → respuesta automática → evidencia → alerta
+en TheHive → caso → observable → análisis en Cortex con resultado real.
+
+**Generalización.** Cuando una aplicación containerizada necesita lanzar contenedores hermanos
+vía el socket de Docker del host ("Docker fuera de Docker"), cualquier ruta que le pase al
+daemon para montar tiene que ser una ruta válida **en el host real**, no en el filesystem propio
+del contenedor — y, si esa ruta es un *bind mount* nuevo, Docker la crea como `root` sin más:
+hay que ajustar sus permisos explícitamente para el usuario con el que corre el proceso, igual
+que con cualquier volumen con nombre.
+
+### 7.15 Automatización del enlace Cortex↔TheHive (antes manual, sin API pública documentada)
+
+**Motivación.** El enlace Cortex↔TheHive (organización + usuario analista + clave API dentro de
+Cortex) se dejó como paso manual de un solo uso desde su primera versión (§7.12), justificado en
+que Cortex no publica ninguna API pública ni documentada para ello. Esa justificación seguía
+siendo cierta, pero "sin documentar" no es lo mismo que "sin API": Cortex es software libre, y
+su propio código fuente confirma qué endpoints existen y qué hace falta para usarlos. Se decidió
+automatizarlo leyendo ese código en vez de seguir dependiendo de una serie de clics manuales
+propensos a error (los tres fallos de configuración de esta misma sesión — clave del superadmin
+en vez de la del analista, falta del rol `orgadmin`, `FileInfo` sin habilitar — fueron todos
+errores humanos en ese flujo manual).
+
+**Diseño.** Se leyó el código fuente de Cortex 3.2.1 directamente desde GitHub
+(`TheHive-Project/Cortex`, *tag* `3.2.1`) para encontrar los endpoints reales y sus requisitos,
+en vez de adivinarlos por prueba y error:
+
+- `conf/routes` — lista completa de endpoints y su controlador.
+- `app/org/thp/cortex/services/UserSrv.scala` — `getInitialUser` concede una identidad especial
+  (`"init"`, con todos los roles) a la primera petición no autenticada que crea un usuario,
+  **mientras el índice de usuarios de toda la instancia esté vacío** (no se filtra por
+  organización: el primer usuario creado en cualquier organización cierra la ventana para
+  siempre, sea cual sea la organización). También confirma que `create()` acepta un campo
+  `password` y lo fija atómicamente en la misma llamada (`authSrv.get.setPassword(...)`) — no
+  hace falta una segunda llamada autenticada para el usuario que todavía no tiene credenciales.
+- `app/org/thp/cortex/controllers/AnalyzerCtrl.scala` — habilitar un analizador para una
+  organización (`POST /api/organization/analyzer/:id`) exige rol `orgadmin` **del usuario que
+  hace la llamada**, sobre su propia organización; no hay parámetro de organización en la ruta,
+  así que el superadmin no puede hacerlo por otra organización aunque tenga más privilegios en
+  apariencia (confirma lo ya visto empíricamente en la adenda de §7.12).
+- `elastic4play/app/org/elastic4play/controllers/MigrationCtrl.scala` — `POST
+  /api/maintenance/migrate` (inicializa la base de datos) no exige autenticación en absoluto.
+
+Con esto, `thehive-cortex/bootstrap/create_cortex_org.sh` (nuevo servicio `cortex-org-bootstrap`
+en `docker-compose.yml`, mismo patrón que `thehive-wazuh-bootstrap`) encadena: inicializar la
+base de datos → crear el superadmin inicial (con contraseña, en la ventana sin autenticar) →
+crear la organización de trabajo `TFM` → crear un usuario analista con roles `read`, `analyze`,
+`orgadmin` → habilitar `FileInfo` para esa organización → obtener (o generar si no existe) su
+clave API → escribirla en `thehive/application.conf`, antes de que arranque `thehive`
+(`depends_on: condition: service_completed_successfully`). Credenciales fijas y ficticias en
+`.env` (`CORTEX_ADMIN_*`, `CORTEX_ANALYST_*`), igual que el resto de credenciales del
+laboratorio.
+
+**Tres fallos reales durante la implementación**, los tres detectados probando el script en
+vivo, no solo leyendo el código:
+
+1. **HTTP Basic no soportado.** Pese a que la configuración por defecto de Cortex sugiere lo
+   contrario, `curl -u usuario:clave` devuelve `401 AuthenticationError` en cualquier endpoint,
+   incluso con una contraseña recién fijada y verificada por otra vía. Confirmado en vivo:
+   `/api/login` (usuario + contraseña en JSON, cookie de sesión `CORTEX_SESSION` de vuelta)
+   funciona perfectamente con las mismas credenciales que Basic rechaza. El script se reescribió
+   para autenticar con `/api/login` y una *cookie jar* por identidad.
+2. **CSRF.** Con la sesión de cookie, el primer `POST` devolvía `403 Forbidden: No CSRF token
+   found`. Cortex fija su cookie CSRF (`CORTEX-XSRF-TOKEN`, cabecera de respuesta
+   `X-CORTEX-XSRF-TOKEN` — nombres definidos en su propio `reference.conf`) en la respuesta de
+   **cualquier llamada autenticada**, pero no en la del propio `/api/login`: hace falta una
+   llamada de más (`GET /api/user/current`) después de iniciar sesión para que la cookie
+   aparezca, antes de poder hacer ningún `POST`.
+3. **Falta el campo `name` al habilitar un analizador.** `POST
+   /api/organization/analyzer/FileInfo_8_0` con cuerpo `{}` devolvía `400
+   AttributeCheckingError: Attribute name is missing` — el modelo interno de Cortex para
+   analizadores habilitados exige `name` explícito en el cuerpo (no lo rellena a partir del id
+   de la URL). Corregido enviando `{"name": "FileInfo_8_0"}`.
+4. (Ya documentado como parte de §7.14, pero afectó también a este script) **Permission denied**
+   al escribir la clave en `application.conf`: el contenedor de `curlimages/curl` corre como UID
+   100 (mismo caso que `thehive-wazuh-bootstrap`, §7.12 Fallo 2), y el reemplazo atómico
+   (escribir aparte + mover) necesita permiso de escritura sobre el **directorio**, no solo
+   sobre el fichero. Corregido montando el directorio completo (no el fichero suelto) con
+   `chmod 777` (mismo patrón que `thehive-cortex/shared/`), en vez del fichero de configuración
+   solo.
+
+**Verificado (2026-08-25).** Reset completo (`docker compose down -v && docker compose up -d`)
+y log de `cortex-org-bootstrap` sin errores: superadmin creado, organización `TFM` creada,
+usuario analista creado, `FileInfo_8_0` habilitado, clave obtenida y escrita en
+`application.conf` — sin ningún paso manual. Confirmado por API, sin tocar la interfaz de
+Cortex para nada:
+
+```
+GET /api/status (TheHive)
+  -> connectors.cortex.status = "OK"
+
+GET /api/connector/cortex/analyzer/type/file (TheHive, con la clave de wazuh@thehive.local)
+  -> FileInfo_8_0 visible como analizador disponible
+```
+
+**Qué se dejó manual, a propósito.** Lanzar el ataque y decidir qué alerta se convierte en caso,
+qué evidencia se analiza y con qué analizador sigue siendo un paso manual — no por limitación
+técnica (con lo aprendido aquí, sería tan automatizable como esto), sino porque automatizarlo
+cambiaría lo que el laboratorio demuestra: el ataque representa al adversario real, y el triage
+es precisamente el criterio del analista que el laboratorio pone a prueba.
+
 ---
 
 ## 8. Pruebas pendientes
@@ -984,4 +1147,4 @@ verificaron el mismo día (§7.12, adenda).
 | C5 | Toda respuesta es reversible | Cumplido. La reversión automática de escenario 1 falló en la primera prueba, se diagnosticó (§7.5) y quedó verificada tras corregir `block_ip.sh` |
 | C6 | Ninguna acción automática afecta al sistema anfitrión | Cumplido |
 | C7 | El entorno se despliega sin intervención manual sobre contenedores | Cumplido — verificado el 2026-07-27 (§6.2) y de nuevo tras las correcciones de §7.6 |
-| C8 | Las alertas del laboratorio llegan a una herramienta de gestión de incidentes con contexto suficiente para un analista | Cumplido — verificado el 2026-08-24 (§7.12) para los tres escenarios, incluido el enlace con Cortex y el analizador `FileInfo` para análisis de artefactos |
+| C8 | Las alertas del laboratorio llegan a una herramienta de gestión de incidentes con contexto suficiente para un analista | Cumplido — verificado el 2026-08-24 (§7.12) para los tres escenarios; el análisis de artefactos con `FileInfo` en Cortex, incluido en el flujo completo, verificado con informe real el 2026-08-25 (§7.14) |

@@ -72,6 +72,8 @@ Detalle de esta parte en §3.12.
 | `cortex-elasticsearch` | Almacenamiento de organizaciones, usuarios, trabajos y resultados de Cortex. Independiente del indexer de Wazuh (productos distintos, sin compatibilidad garantizada entre versiones). |
 | `thehive-volume-permissions` | Bootstrap de un solo uso. Normaliza a UID/GID 1000 los volúmenes de TheHive, creados por Docker como `root` (§3.12, `docs/validation_plan.md` §7.12). |
 | `thehive-wazuh-bootstrap` | Bootstrap de un solo uso. Crea en TheHive la organización y el usuario de la integración Wazuh→TheHive y genera su clave API automáticamente (§3.12). |
+| `cortex-jobs-permissions` | Bootstrap de un solo uso. Da permiso de escritura a Cortex (UID 1001) sobre el directorio de trabajo de los analizadores (`docs/validation_plan.md` §7.14). |
+| `cortex-org-bootstrap` | Bootstrap de un solo uso. Inicializa Cortex, crea su organización de trabajo y usuario analista, habilita `FileInfo` y escribe su clave API en `application.conf` de TheHive — automatiza el enlace Cortex↔TheHive (§3.12, `docs/validation_plan.md` §7.15). |
 
 ---
 
@@ -349,26 +351,33 @@ funciona Cortex en cualquier despliegue, no una elección de este laboratorio; e
 concreto habilitado (`FileInfo`) es estático, sin claves API externas, y no ejecuta nada contra
 la red del laboratorio.
 
-**Integración Wazuh→TheHive automatizada; enlace Cortex↔TheHive manual.** Estas dos partes
-tienen un tratamiento distinto porque su superficie de automatización es distinta:
+**Ambas integraciones automatizadas, con superficies de API muy distintas.** TheHive expone una
+API REST v1 estable y documentada (`TheHive-Project/api-docs`) para crear organizaciones,
+usuarios y claves API. El bootstrap (`thehive-cortex/bootstrap/create_wazuh_api_key.sh`) la usa
+para crear una organización y un usuario dedicados a la integración Wazuh→TheHive y generar su
+clave, sin intervención humana. El bloque `<integration>` de `wazuh_manager.conf` reenvía como
+alerta de TheHive las alertas de las reglas del laboratorio (100010-100031), usando solo la
+biblioteca estándar de Python (`config/wazuh_cluster/integrations/custom-w2thive.py`) porque la
+imagen oficial de `wazuh.manager` no permite instalar dependencias sin un Dockerfile propio.
+Verificado en vivo para los tres escenarios — detalle en `docs/validation_plan.md` §7.12.
 
-- TheHive expone una API REST v1 estable y documentada
-  (`TheHive-Project/api-docs`) para crear organizaciones, usuarios y claves API. El bootstrap
-  (`thehive-cortex/bootstrap/create_wazuh_api_key.sh`) la usa para crear una organización y un
-  usuario dedicados a la integración y generar su clave, sin intervención humana. El bloque
-  `<integration>` de `wazuh_manager.conf` reenvía como alerta de TheHive las alertas de las
-  reglas del laboratorio (100010-100031), usando solo la biblioteca estándar de Python
-  (`config/wazuh_cluster/integrations/custom-w2thive.py`) porque la imagen oficial de
-  `wazuh.manager` no permite instalar dependencias sin un Dockerfile propio. Verificado en vivo
-  para los tres escenarios — detalle en `docs/validation_plan.md` §7.12.
-- El enlace Cortex↔TheHive (organización + usuario + clave API *dentro de Cortex*, pegada
-  después en `application.conf` de TheHive) **no** tiene una vía de API equivalente y
-  documentada: es un paso manual por diseño en todo el ecosistema TheHive/Cortex, no un
-  descuido de este laboratorio — la propia plantilla oficial mínima lo resuelve a golpe de
-  clic en la interfaz web, y existe una petición de automatizarlo abierta en el repositorio
-  oficial de TheHive desde 2018, nunca implementada, con el repositorio ya archivado. Se deja
-  como paso manual documentado en el README, igual que se documentó cualquier otra limitación
-  real de este tipo (p. ej. `whodata`/`auditd` en §5).
+El enlace Cortex↔TheHive (organización + usuario + clave API *dentro de Cortex*, pegada después
+en `application.conf` de TheHive) es harina de otro costal: Cortex **no** publica ninguna API
+pública ni documentada para esto — la propia plantilla oficial mínima lo resuelve a golpe de
+clic en la interfaz web, y existe una petición de automatizarlo abierta en el repositorio
+oficial de TheHive desde 2018, nunca implementada, con el repositorio ya archivado. Pero
+"sin documentar" no es lo mismo que "sin API": Cortex es software libre, y su código fuente (no
+su documentación) confirma que los endpoints necesarios existen — `POST /api/organization`,
+`POST /api/user`, `POST /api/organization/analyzer/:id`, `POST /api/user/:id/key/renew`, todos
+en `org.thp.cortex.controllers.*` — y hasta un mecanismo de *bootstrap* pensado exactamente para
+este caso: mientras la instancia no tenga ningún usuario, admite crear el primer superadmin sin
+autenticar (`UserSrv.getInitialUser`, condicionado a que el índice de usuarios esté vacío).
+`thehive-cortex/bootstrap/create_cortex_org.sh` encadena esos endpoints — inicializar la base de
+datos, crear el superadmin inicial, una organización de trabajo, un usuario analista con permiso
+para habilitar analizadores, habilitar `FileInfo` y generar su clave — y escribe esa clave
+directamente en `application.conf` de TheHive antes de que arranque. Detalle de cómo se
+localizaron los endpoints (leyendo el código fuente de Cortex 3.2.1, no por prueba y error) y
+verificación en vivo en `docs/validation_plan.md` §7.15.
 
 **Permisos de UID, otra vez.** El despliegue reveló tres fallos reales de UID/permisos
 (volúmenes de TheHive creados como `root` pero consumidos por UID 1000; un directorio
@@ -424,10 +433,6 @@ socket de Docker de `cortex`, justificada arriba.
   reiniciar el agente (`docker compose restart victim`). No afecta a la demostración del ciclo
   una vez, pero sí a repetirlo sin reiniciar. Investigación y verificación en
   `docs/validation_plan.md` §7.11.
-- **Enlace Cortex↔TheHive manual.** El análisis de artefactos con Cortex (analizador
-  `FileInfo`) no queda demostrado hasta completar el paso manual de un solo uso documentado en
-  el README — limitación conocida del propio ecosistema TheHive/Cortex, no automatizable con
-  una API estable (§3.12). La integración Wazuh→TheHive sí está automatizada y verificada.
 
 ---
 

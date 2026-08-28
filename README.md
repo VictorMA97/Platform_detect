@@ -164,41 +164,36 @@ alertas del laboratorio las crea el usuario `wazuh@thehive.local` dentro de la o
 `tfm-apt-lab` (ambos creados automáticamente por el bootstrap); si no las ves con el usuario
 `admin`, añádelo también a esa organización desde **Administration → Organisations**.
 
-**Cortex**: `http://localhost:9001`. A diferencia de TheHive, el enlace Cortex↔TheHive (para
-poder analizar artefactos desde una alerta) **es un paso manual de un solo uso** — no existe
-una vía de API estable para automatizarlo, es una limitación conocida de todo el ecosistema
-TheHive/Cortex, no un descuido de este laboratorio (`docs/architecture.md` §3.12).
+**Cortex**: `http://localhost:9001`. El enlace Cortex↔TheHive (para poder analizar artefactos
+desde una alerta) **es automático**: el servicio de un solo uso `cortex-org-bootstrap`
+(`thehive-cortex/bootstrap/create_cortex_org.sh`) inicializa la base de datos de Cortex, crea
+una organización de trabajo (`TFM`) y un usuario analista, habilita el analizador `FileInfo` y
+escribe su clave API en `thehive-cortex/thehive/application.conf` antes de que arranque
+`thehive` — sin ningún paso manual. Las credenciales que usa (ficticias, de laboratorio) están
+en `.env` (`CORTEX_ADMIN_*`, `CORTEX_ANALYST_*`). Detalle de cómo se automatizó (los endpoints
+de la API de Cortex no son públicos ni están documentados; se confirmaron leyendo su código
+fuente) en `docs/validation_plan.md` §7.15.
 
-> Mientras completas estos pasos, `docker compose logs cortex` va a mostrar de forma repetida
-> `index_not_found_exception` sobre `cortex_N` y `Authentication using API key is not
-> supported` con la clave `PENDIENTE_DE_CONFIGURACION_MANUAL`. Es el estado esperado antes de
-> inicializar la base de datos y pegar una clave real — no un fallo (`docs/validation_plan.md`
-> §7.13).
+Verifica que quedó enlazado en el menú de usuario de TheHive → **About**: Cortex debe aparecer
+como `OK`, y `FileInfo` como analizador disponible al añadir un observable de tipo `file` a un
+caso.
 
-1. Entra en `http://localhost:9001`. En el primer acceso, Cortex muestra una pantalla de base
-   de datos sin inicializar: acepta la inicialización (crea los índices en
-   `cortex-elasticsearch`) y, cuando te lo pida, crea el primer usuario (superadmin).
-2. Inicia sesión con ese usuario y ve a **Organizations** → crea una organización nueva (por
-   ejemplo `TFM`, el nombre es libre). Solo existe de entrada la organización de sistema
-   `cortex`, que es de gestión de la instancia, no una organización de trabajo.
-3. Dentro de esa organización, crea un usuario con roles **`read`, `analyze` y `orgadmin`**.
-   Los tres son necesarios: `read`/`analyze` para poder ejecutar analizadores, y `orgadmin`
-   para poder habilitar analizadores para la organización en el paso siguiente — con solo
-   `read, analyze` esa opción de la interfaz ni aparece. No uses el superadmin para nada de
-   esto: pertenece a la organización de sistema y no puede ejecutar analizadores aunque tenga
-   más privilegios en apariencia.
-4. **Cierra sesión del superadmin y entra con ese usuario nuevo** (contraseña la que le hayas
-   puesto al crearlo). En la barra superior, en el menú **Organization**, ve a la pestaña
-   **Analyzers**, busca **FileInfo** en el catálogo (no requiere clave de servicio externo,
-   sirve para probar la integración sin credenciales adicionales) y actívalo.
-5. Sigue con ese mismo usuario: en su perfil, genera una clave API (**Create API key** →
-   **reveal**) y cópiala.
-6. Pega esa clave en `thehive-cortex/thehive/application.conf`, sustituyendo
-   `PENDIENTE_DE_CONFIGURACION_MANUAL`.
-7. `docker compose restart thehive`.
-8. En TheHive, verifica en el menú de usuario → **About** que Cortex aparece como `OK`, y que
-   `FileInfo` aparece como analizador disponible al añadir un observable de tipo `file` a un
-   caso.
+Si `docker compose logs cortex-org-bootstrap` muestra que algún paso no se pudo completar (por
+ejemplo, porque ya existía un superadmin distinto creado a mano antes de que existiera este
+script, con otras credenciales), hazlo tú mismo en la UI de Cortex:
+
+1. Entra en `http://localhost:9001` y crea el primer usuario (superadmin) si no existe.
+2. **Organizations** → crea una organización de trabajo (el nombre es libre). Solo existe de
+   entrada la organización de sistema `cortex`, que es de gestión de la instancia.
+3. Dentro de ella, crea un usuario con roles **`read`, `analyze` y `orgadmin`** — los tres son
+   necesarios: `read`/`analyze` para ejecutar analizadores, `orgadmin` para poder habilitarlos
+   (con solo `read, analyze` esa opción de la interfaz ni aparece). No uses el superadmin para
+   esto: pertenece a la organización de sistema y no puede ejecutar analizadores.
+4. Cierra sesión del superadmin y entra con ese usuario nuevo. **Organization → Analyzers**,
+   busca **FileInfo** en el catálogo y actívalo.
+5. En su perfil, genera una clave API (**Create API key** → **reveal**) y pégala en
+   `thehive-cortex/thehive/application.conf`, sustituyendo `PENDIENTE_DE_CONFIGURACION_MANUAL`.
+6. `docker compose restart thehive`.
 
 ---
 
