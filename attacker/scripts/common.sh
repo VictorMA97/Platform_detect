@@ -11,12 +11,9 @@ RESULTS_DIR="/opt/results"
 RESULTS_LOG="${RESULTS_DIR}/timings.log"
 mkdir -p "${RESULTS_DIR}"
 
-# Copia local, dentro del propio contenedor 'attacker' (no es un bind mount
-# como /opt/results: vive en su capa escribible). Sirve para poder revisar
-# el historial de ataques con 'docker compose exec attacker cat ...' sin
-# tocar el host, y sobrevive a un 'restart' del contenedor -- se pierde solo
-# si se destruye y recrea (down/up, rm), igual que cualquier otro dato no
-# persistido explícitamente.
+# Copia local (capa escribible del contenedor, no un bind mount): la sigue
+# el CMD del Dockerfile para que 'docker compose logs attacker -f' la
+# muestre en vivo.
 LOCAL_LOG_DIR="/var/log/attack"
 LOCAL_LOG="${LOCAL_LOG_DIR}/timings.log"
 mkdir -p "${LOCAL_LOG_DIR}"

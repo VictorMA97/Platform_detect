@@ -1,52 +1,24 @@
 #!/bin/sh
-# Bootstrap de un solo uso: hace en Cortex, por API, exactamente lo que hasta
-# ahora habia que hacer a mano en su interfaz (ver README, seccion "Gestion
-# de incidentes", version anterior a este script):
-#   1. inicializar la base de datos (POST /api/maintenance/migrate)
-#   2. crear el primer usuario (superadmin), unico paso que Cortex permite
-#      sin autenticar -- pero solo mientras no exista NINGUN usuario en toda
-#      la instancia (org.thp.cortex.services.UserSrv.getInitialUser, en el
-#      propio codigo fuente de Cortex: cuenta usuarios sin filtrar por
-#      organizacion). Password fijado en el mismo POST (UserSrv.create llama
-#      a authSrv.setPassword si el campo "password" viene en el body), asi
-#      que no hace falta un segundo paso autenticado para el usuario que
-#      todavia no tiene credenciales. (El "hasPassword": false que devuelve
-#      la respuesta es enganoso: es una foto del objeto tomada ANTES de
-#      fijar la contrasena, no significa que no se haya guardado -- probado
-#      en vivo iniciando sesion con ella justo despues.)
-#   3. crear una organizacion de trabajo (el superadmin vive en la
-#      organizacion de sistema 'cortex' y NO puede ejecutar analizadores;
-#      confirmado en vivo, ver docs/validation_plan.md §7.12 adenda)
-#   4. crear en ella un usuario con roles read+analyze+orgadmin (orgadmin es
-#      imprescindible: sin el, nadie puede habilitar analizadores para esa
-#      organizacion, ni siquiera el superadmin desde fuera)
-#   5. habilitar el analizador FileInfo para esa organizacion
-#      (POST /api/organization/analyzer/:id, scopeado a la organizacion del
-#      usuario autenticado -- por eso hace falta el usuario del paso 4, no
-#      el superadmin; y necesita "name" en el cuerpo, o Cortex responde
-#      AttributeCheckingError)
-#   6. obtener (o generar si no existe) la clave API de ese usuario
-#   7. escribir esa clave dentro de thehive/application.conf, sustituyendo
-#      el valor que haya en la linea 'key = "..."' del bloque cortex.servers
-#      -- unico paso que sigue siendo necesario porque ese fichero lo lee
-#      TheHive una sola vez, al arrancar (HOCON, no hay recarga en caliente)
+# Bootstrap de un solo uso: automatiza por API el enlace Cortex<->TheHive
+# (organizacion, usuario analista, analizador FileInfo, clave API), antes
+# manual en la UI de Cortex. Que endpoint hace falta para cada paso y por
+# que (codigo fuente de Cortex, no documentacion oficial -- no la publica)
+# esta en docs/validation_plan.md §7.15; aqui solo lo no obvio para leer
+# el script:
 #
-# Autenticacion: Cortex 3.2.1 tiene deshabilitado el transporte HTTP Basic
-# pese a que su config por defecto sugiere lo contrario (comprobado en
-# vivo: 'curl -u usuario:clave' devuelve 401 en cualquier endpoint). Hay que
-# autenticar con /api/login (usuario+password -> cookie de sesion
-# CORTEX_SESSION) y, para cualquier POST/PATCH/DELETE, mandar ademas el
-# token CSRF que Cortex emite en la cookie CORTEX-XSRF-TOKEN (nombres fijados
-# en su reference.conf) como cabecera X-CORTEX-XSRF-TOKEN -- si no, Cortex
-# responde 403 Forbidden. La cookie CSRF no la emite el propio /api/login:
-# hace falta una llamada GET autenticada despues para que aparezca.
+# - Cortex acepta un POST /api/user sin autenticar solo mientras no exista
+#   NINGUN usuario en toda la instancia (UserSrv.getInitialUser); por eso
+#   el superadmin se crea asi, con password en el mismo POST, y todo lo
+#   demas necesita sesion.
+# - Cortex tiene deshabilitado HTTP Basic pese a que su config por defecto
+#   sugiere lo contrario. Hay que autenticar con /api/login (cookie de
+#   sesion) y mandar el token CSRF que emite en la cookie
+#   CORTEX-XSRF-TOKEN como cabecera X-CORTEX-XSRF-TOKEN en cada
+#   POST/PATCH/DELETE, o responde 403 -- y esa cookie no la emite el propio
+#   /api/login, hace falta una llamada autenticada mas antes de tenerla.
 #
-# Idempotente y permisivo, igual que create_wazuh_api_key.sh: si algun paso
-# falla porque el recurso ya existe (ejecuciones repetidas del bootstrap) se
-# registra un aviso y se continua. Si el superadmin ya existe con OTRAS
-# credenciales (alguien completo el paso a mano antes de que existiera este
-# script), no hay forma de saber su password: se avisa y se sale sin tocar
-# nada mas.
+# Idempotente y permisivo, igual que create_wazuh_api_key.sh: si algo ya
+# existe o falla, se avisa y se continua en vez de abortar.
 set -eu
 
 CORTEX_URL="http://cortex:9001"
@@ -182,12 +154,8 @@ if [ -z "${KEY}" ] || [ "${#KEY}" -lt 10 ]; then
 fi
 
 echo "Escribiendo la clave en ${APPLICATION_CONF}..."
-# Anclado a que 'key' sea el primer token tras la indentacion (no basta con
-# contener la subcadena 'key = "': eso tambien encaja con la linea
-# 'play.http.secret.key = "..."', el secreto de Play, que no hay que tocar).
-# El fichero se escribe dentro del mismo directorio que se monta (no como
-# bind mount de un unico fichero) para poder hacer un reemplazo atomico
-# (escribir aparte + mover) sin tropezar con el punto de montaje.
+# Anclado a 'key' como primer token: 'play.http.secret.key = "..."' tambien
+# contiene la subcadena 'key = "' y no hay que tocarlo.
 awk -v k="${KEY}" '
     $0 ~ /^[[:space:]]*key = "/ {
         match($0, /^[[:space:]]*/)

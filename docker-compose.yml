@@ -193,13 +193,9 @@ services:
   # Ejecuta analizadores como contenedores Docker efimeros: requiere el
   # socket de Docker del host. Es el unico servicio del laboratorio con
   # ese privilegio; justificacion y alcance en docs/architecture.md.
-  # Docker crea /tmp/cortex-jobs como root:root 0755 al montarlo por primera
-  # vez (es un bind mount de host, no un volumen con nombre), pero Cortex
-  # corre como UID/GID 1001 y necesita poder crear subdirectorios ahi dentro
-  # para cada trabajo de analizador -- mismo patron que thehive-volume-permissions.
-  # Sin esto, los analizadores fallan con un AccessDeniedException al crear
-  # el directorio del trabajo (el mensaje de la excepcion es solo la ruta,
-  # sin mas detalle, lo que lo hace facil de confundir con otro problema).
+  # /tmp/cortex-jobs se crea root:root al montarse por primera vez (bind
+  # mount, no volumen con nombre); Cortex corre como UID 1001 y necesita
+  # escribir ahi (docs/validation_plan.md §7.14).
   cortex-jobs-permissions:
     image: alpine:3.20
     networks:
@@ -234,28 +230,17 @@ services:
     volumes:
       - ./thehive-cortex/cortex/application.conf:/etc/cortex/application.conf:ro
       - /var/run/docker.sock:/var/run/docker.sock
-      # Mismo path a los dos lados, a proposito: es el directorio de trabajo
-      # de los analizadores (job.directory en application.conf), y el daemon
-      # del host necesita poder resolver esa misma ruta al montarla, a su
-      # vez, dentro de cada contenedor de analizador. Ver el comentario junto
-      # a 'job.directory' en thehive-cortex/cortex/application.conf.
+      # Mismo path a los dos lados, a proposito: ver 'job.directory' en
+      # thehive-cortex/cortex/application.conf.
       - /tmp/cortex-jobs:/tmp/cortex-jobs
     ports:
       - "9001:9001"
-    # --secret es la via nativa del entrypoint de la imagen para fijar el
-    # secreto (independiente de si ${?CORTEX_SECRET} llega o no al proceso
-    # de Cortex via variable de entorno -- ver el comentario en
-    # thehive-cortex/cortex/application.conf, que ya trae un secreto fijo
-    # de sobra largo como red de seguridad).
+    # Via nativa del entrypoint para fijar el secreto, independiente de
+    # ${?CORTEX_SECRET} (ver application.conf, docs/validation_plan.md §7.13).
     command: ["--secret", "${CORTEX_SECRET:?falta CORTEX_SECRET en .env}"]
 
-  # Bootstrap de un solo uso: hace por API todo lo que antes era manual en la
-  # UI de Cortex (inicializar la base de datos, crear organizacion y usuario
-  # analista, habilitar FileInfo, generar su clave) y la escribe directamente
-  # en thehive/application.conf. Ver el comentario al principio de
-  # create_cortex_org.sh para el porque de cada paso (confirmado leyendo el
-  # codigo fuente de Cortex 3.2.1, no por prueba y error) y
-  # docs/validation_plan.md §7.15 para la verificacion en vivo.
+  # Bootstrap de un solo uso: automatiza por API el enlace Cortex<->TheHive,
+  # antes manual (create_cortex_org.sh, docs/validation_plan.md §7.15).
   cortex-org-bootstrap:
     image: curlimages/curl:8.10.1
     networks:
@@ -270,13 +255,9 @@ services:
       - CORTEX_ANALYST_PASSWORD=${CORTEX_ANALYST_PASSWORD:?falta CORTEX_ANALYST_PASSWORD en .env}
     volumes:
       - ./thehive-cortex/bootstrap/create_cortex_org.sh:/create_cortex_org.sh:ro
-      # Se monta el directorio completo, no solo el fichero: el reemplazo de
-      # la clave se hace escribiendo aparte + moviendo (atomico), y eso
-      # necesita poder crear un fichero nuevo en el mismo directorio, no
-      # solo escribir sobre el punto de montaje de un bind mount de un unico
-      # fichero. Directorio a 777 (ver thehive-cortex/thehive/, mismo motivo
-      # que thehive-cortex/shared/ en el bootstrap de Wazuh->TheHive):
-      # curlimages/curl corre como UID 100, no el propietario del host.
+      # Directorio completo, no solo el fichero (hace falta para el
+      # reemplazo atomico); a 777 porque curlimages/curl corre como UID 100,
+      # mismo motivo que thehive-cortex/shared/.
       - ./thehive-cortex/thehive:/thehive-application-conf
     entrypoint: ["sh", "/create_cortex_org.sh"]
 
