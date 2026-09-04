@@ -142,7 +142,7 @@ services:
       - agent-queue:/var/ossec/queue
       - ./victim/scripts-active-response:/opt/ar-src:ro
       - ./evidence:/var/ossec/evidence
-      - ./baseline:/opt/baseline:ro
+      - ./victim/baseline:/opt/baseline:ro
     ports:
       - "2222:22"
     depends_on:
