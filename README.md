@@ -37,6 +37,12 @@ Documentación ampliada: [`docs/validation_plan.md`](docs/validation_plan.md) �
   `docker compose`: lo necesita `cortex` para lanzar analizadores como contenedores efímeros.
 - Salida a Internet **únicamente** la primera vez que se generan los certificados TLS o se
   invoca un analizador de Cortex (descarga su imagen la primera vez).
+- Si `docker compose` falla con un error de permisos sobre `/var/run/docker.sock`, tu usuario
+  no pertenece al grupo `docker` (mensaje oficial de Docker: *"The docker user group exists
+  but contains no users, which is why you're required to use sudo to run Docker commands"*).
+  Ejecuta los comandos de este README con `sudo` o añade tu usuario al grupo (`sudo usermod
+  -aG docker $USER`, cerrar sesión y volver a entrar) — sin uno de los dos, `cortex` tampoco
+  podrá lanzar analizadores en tiempo de ejecución.
 - `vm.max_map_count` ≥ 262144 en el host que ejecuta el motor de Docker:
 
 ```bash
