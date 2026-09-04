@@ -37,7 +37,7 @@ Deben superarse todas antes de iniciar los casos de prueba.
 | P8 | Línea base de cuentas | `docker compose exec victim sh -c "cut -d: -f1 /etc/passwd \| sort > /var/ossec/evidence/passwd.baseline"` | Fichero generado |
 | P9 | API REST del indexer accesible | `curl -sk -u admin:<INDEXER_PASSWORD> https://localhost:9200` | Respuesta JSON con `"cluster_name"` |
 
-Sin interfaz web (§3.10 de `docs/architecture.md`), filtrar las alertas del laboratorio se
+Sin interfaz web, filtrar las alertas del laboratorio se
 hace por el campo `rule.groups` directamente sobre `alerts.json`:
 
 ```bash
@@ -537,8 +537,7 @@ cubría por seguir siendo, en ese momento, técnicamente correctas aunque incóm
 4. **El Dockerfile del atacante instalaba `hydra` y diccionarios sin usar.**
    `ssh_bruteforce_test.sh` siempre implementó la fuerza bruta con un bucle propio de
    `sshpass`, no con `hydra`; el binario y los ficheros `users.txt`/`passwords.txt` eran peso
-   muerto que además contradecía la afirmación de `docs/architecture.md` de que el atacante
-   "no incorpora herramientas ofensivas de propósito general". Eliminados del Dockerfile.
+   muerto. Eliminados del Dockerfile.
 
 **Generalización.** Ninguna de las cuatro era un defecto funcional del laboratorio en el
 sentido de C1-C7 — el entorno detectaba, respondía y generaba evidencia igualmente. Eran
@@ -550,9 +549,8 @@ documentado.
 
 ### 7.7 Retirada de `wazuh.dashboard` sin actualizar quién más lo daba por sentado
 
-**Observación.** Se retiró el servicio `wazuh.dashboard` de `docker-compose.yml` (decisión de
-alcance, justificada en `docs/architecture.md` §3.10) y, en el mismo cambio, se renombró el
-servicio `wazuh.agent` a `victim`. El segundo cambio, aparentemente cosmético, rompió los tres
+**Observación.** Se retiró el servicio `wazuh.dashboard` de `docker-compose.yml` y, en el mismo cambio, 
+se renombró el servicio `wazuh.agent` a `victim`. El segundo cambio, aparentemente cosmético, rompió los tres
 scripts de ataque: `attacker/scripts/common.sh` fijaba `TARGET_HOST="${TARGET_HOST:-wazuh.agent}"`,
 y ese nombre dejó de resolver por DNS interno de Docker en cuanto el servicio pasó a llamarse
 `victim` (`getent hosts wazuh.agent` → sin resultado; `getent hosts victim` → resuelve).
@@ -594,7 +592,7 @@ infraestructura sin auditar exhaustivamente quién depende de sus nombres.
 este laboratorio, frente a los heredados del `docker-compose.yml` oficial de Wazuh pensados
 para capacidades que aquí no se usan (grupos de agentes múltiples, integraciones de terceros,
 dispositivos sin agente, módulos extendidos, Active Response ejecutado en el manager en vez de
-en el agente). Detalle de la justificación por volumen en `docs/architecture.md` §3.11.
+en el agente).
 
 **Cambio aplicado.** Eliminados de `docker-compose.yml`: `wazuh_api_configuration`,
 `wazuh_var_multigroups`, `wazuh_integrations`, `wazuh_active_response` (del manager),
@@ -641,8 +639,7 @@ que el repositorio contiene y lo que realmente se usa:
   analogía al Dockerfile propio de `victim` sin implementar el lado que lo hace funcionar.
 - El origen de ese bind mount, `victim/ossec.conf`, era además un **directorio fantasma**
   vacío — ni siquiera estaba trackeado en git (`git ls-files` no lo lista) — recreado por
-  Docker en cada arranque por apuntar a un fichero inexistente, el mismo síntoma ya descrito en
-  `docs/architecture.md` §6 (Notas operativas).
+  Docker en cada arranque por apuntar a un fichero inexistente.
 - `attacker/scripts/create_user_attack.sh` tenía tres mensajes de error que mencionaban
   `agent-target`, el nombre del directorio antes del rename a `victim`.
 - Los ocho scripts `.sh` del repositorio estaban trackeados en git con modo `100644` (sin bit
@@ -739,9 +736,8 @@ Repetido tres veces el ciclo "reinicio → primer cambio detectado → segundo c
 detectado", con el mismo resultado las tres veces.
 
 **Causa probable.** `/etc/passwd` y `/etc/group` están declarados con `realtime="yes"` en
-`ossec.conf` (no `whodata`: como ya documenta `docs/architecture.md` §5, el motor whodata no
-arranca en este contenedor por no haber `auditd`, y `syscheckd` lo degrada automáticamente a
-`realtime` — confirmado en el log: `WARNING: (6923): Who-data engine cannot start because
+`ossec.conf` (no `whodata`: el motor whodata no arranca en este contenedor por no haber `auditd`, y `syscheckd` 
+lo degrada automáticamente a`realtime` — confirmado en el log: `WARNING: (6923): Who-data engine cannot start because
 Auditd is not running`). El modo `realtime` depende de un *watch* de `inotify` sobre el inodo
 del fichero. `useradd`/`userdel` (como la mayoría de herramientas de `shadow-utils`) no
 modifican el fichero en su sitio: escriben una copia temporal y hacen `rename()` sobre el
@@ -770,8 +766,7 @@ el `syscheckd` recién arrancado es el del ataque, no el de la limpieza previa.
 
 **No se ha aplicado ningún cambio de configuración** (por ejemplo, forzar `whodata` con
 `auditd` instalado, o pasar estas rutas a `scheduled` con una frecuencia corta) porque ambas
-opciones alteran el mecanismo de detección que describen `docs/architecture.md` y
-`docs/mitre_mapping.md` para el escenario 2, y esta incidencia no impide demostrar el ciclo
+opciones alteran el mecanismo de detección para el escenario 2, y esta incidencia no impide demostrar el ciclo
 completo una vez — solo su repetición dentro de la misma vida del contenedor. Queda como
 mejora futura si se prioriza la repetibilidad del escenario 2 sobre la fidelidad del mecanismo
 de detección documentado.
@@ -798,7 +793,6 @@ cumplimiento previo). Se añadió un stack mínimo (TheHive 4 con almacenamiento
 BerkeleyDB+Lucene, sin Cassandra/MinIO; Cortex 3 con su propio Elasticsearch) y una
 integración nativa Wazuh→TheHive (bloque `<integration>` en `wazuh_manager.conf`) que reenvía
 como alerta de TheHive las alertas de las reglas locales del laboratorio (100010-100031).
-Detalle de la arquitectura y las decisiones en `docs/architecture.md`.
 
 Esta sección documenta tres fallos reales encontrados y corregidos durante el despliegue —
 ninguno hipotético, los tres bloqueaban el arranque o la integración por completo hasta
@@ -976,8 +970,8 @@ distintos, en dos intentos:
    `/tmp/cortex-jobs/cortex-job-IknPOKABCrIAaC6oFEpt-2297875958634964880`.
 
 **Causa raíz.** Cortex corre él mismo como contenedor, pero lanza cada analizador como un
-contenedor **hermano** a través del socket de Docker del host montado en el servicio (`docs/architecture.md`
-§3.12). Para pasarle el trabajo a analizar, Cortex escribe `input.json` en un directorio y le
+contenedor **hermano** a través del socket de Docker del host montado en el servicio. 
+Para pasarle el trabajo a analizar, Cortex escribe `input.json` en un directorio y le
 pide al **daemon del host** que monte esa misma ruta dentro del contenedor del analizador en
 `/job` (confirmado leyendo el código fuente de Cortex 3.2.1:
 `app/org/thp/cortex/services/DockerJobRunnerSrv.scala` y `.../util/docker/DockerClient.scala`,
