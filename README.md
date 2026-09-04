@@ -24,11 +24,7 @@ ningún paso manual. Detección, respuesta y la integración con TheHive son com
 automáticas; decidir qué alerta se convierte en caso y qué evidencia se analiza sigue siendo
 criterio del analista — es justo lo que este laboratorio pone a prueba.
 
-Documentación ampliada:
-
-- [`docs/architecture.md`](docs/architecture.md) — arquitectura, flujo detallado y decisiones técnicas.
-- [`docs/mitre_mapping.md`](docs/mitre_mapping.md) — mapeo MITRE ATT&CK de cada escenario.
-- [`docs/validation_plan.md`](docs/validation_plan.md) — qué se espera de cada escenario, casos de prueba, métricas y resultados obtenidos.
+Documentación ampliada: [`docs/validation_plan.md`](docs/validation_plan.md) — qué se espera de cada escenario, casos de prueba, métricas y resultados obtenidos.
 
 ---
 
@@ -38,8 +34,7 @@ Documentación ampliada:
 - **10 GB de RAM disponibles para Docker** (indexer + cortex-elasticsearch reservan 1 GB y
   256 MB de heap JVM respectivamente; TheHive y Cortex, JVMs propias adicionales).
 - Acceso al socket de Docker del host (`/var/run/docker.sock`) para el usuario que ejecuta
-  `docker compose`: lo necesita `cortex` para lanzar analizadores como contenedores efímeros
-  (`docs/architecture.md` §3.12).
+  `docker compose`: lo necesita `cortex` para lanzar analizadores como contenedores efímeros.
 - Salida a Internet **únicamente** la primera vez que se generan los certificados TLS o se
   invoca un analizador de Cortex (descarga su imagen la primera vez).
 - `vm.max_map_count` ≥ 262144 en el host que ejecuta el motor de Docker:
@@ -47,11 +42,6 @@ Documentación ampliada:
 ```bash
 sudo sysctl -w vm.max_map_count=262144
 ```
-
-> **Windows / WSL2.** Ejecuta el laboratorio desde el sistema de ficheros nativo de la
-> distribución WSL (`~/proyectos/...`), **nunca desde `/mnt/c/...`**: los bind mounts vía
-> `drvfs` dan problemas de permisos. Si `.env` se ha editado en Windows, verifica que no tenga
-> terminadores CRLF/BOM (`dos2unix .env`), o `docker compose` puede ignorar sus variables.
 
 ---
 
@@ -268,7 +258,5 @@ rm -f evidence/2026* evidence/active_response.log evidence/hashes.txt results/ti
 Este laboratorio contiene configuraciones **deliberadamente débiles** con fines
 demostrativos (SSH con autenticación por contraseña, registro de agentes sin contraseña,
 credenciales ficticias en texto plano) que no deben trasladarse a ningún entorno real.
-Detalle completo y justificación en
-[`docs/architecture.md`](docs/architecture.md#4-consideraciones-de-seguridad-del-entorno).
 Todo el tráfico ofensivo queda confinado a la red Docker del laboratorio; ninguna acción
 automática modifica el sistema anfitrión.
