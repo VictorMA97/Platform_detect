@@ -57,8 +57,8 @@ El repositorio incluye un fichero `.env` con las variables del laboratorio (vers
 imagen y credenciales explícitamente ficticias); `docker compose` lo carga automáticamente.
 
 ```bash
-docker compose up -d
-docker compose ps
+sudo docker compose up -d
+sudo docker compose ps
 ```
 
 Un único comando basta tanto en el primer arranque como en los siguientes: incluye Wazuh,
@@ -73,7 +73,7 @@ quedar operativo; TheHive y Cortex, algo más.
 Verificación rápida de que todo está listo:
 
 ```bash
-docker compose exec wazuh.manager /var/ossec/bin/agent_control -l   # agente "Active"
+sudo docker compose exec wazuh.manager /var/ossec/bin/agent_control -l   # agente "Active"
 ```
 
 El ciclo de detección de Wazuh no tiene interfaz web (sin `wazuh.dashboard`): las alertas se
@@ -104,7 +104,7 @@ a esa organización desde **Administration → Organisations**.
 Verifica el enlace con Cortex en el menú de usuario de TheHive → **About**: debe aparecer como
 `OK`, y `FileInfo` como analizador disponible al añadir un observable de tipo `file` a un caso.
 
-Si `docker compose logs cortex-org-bootstrap` muestra que algún paso no se pudo completar (por
+Si `sudo docker compose logs cortex-org-bootstrap` muestra que algún paso no se pudo completar (por
 ejemplo, porque ya existía un superadmin distinto creado a mano antes de que existiera este
 script, con otras credenciales), hazlo tú mismo en la UI de Cortex:
 
@@ -119,7 +119,7 @@ script, con otras credenciales), hazlo tú mismo en la UI de Cortex:
    busca **FileInfo** en el catálogo y actívalo.
 5. En su perfil, genera una clave API (**Create API key** → **reveal**) y pégala en
    `thehive-cortex/thehive/application.conf`, sustituyendo `PENDIENTE_DE_CONFIGURACION_MANUAL`.
-6. `docker compose restart thehive`.
+6. `sudo docker compose restart thehive`.
 
 ---
 
@@ -131,13 +131,13 @@ cruzando `results/timings.log`, `alerts.json` y `evidence/active_response.log`:
 
 ```bash
 # Escenario 1 — Fuerza bruta SSH (T1110)
-scripts/measure_timings.sh 1
+sudo scripts/measure_timings.sh 1
 
 # Escenario 2 — Creación de cuenta local (T1136)
-scripts/measure_timings.sh 2
+sudo scripts/measure_timings.sh 2
 
 # Escenario 3 — Inserción de clave SSH (T1098.004)
-scripts/measure_timings.sh 3
+sudo scripts/measure_timings.sh 3
 ```
 
 Cada uno lanza el ataque, espera 10 s a que se propaguen alerta y respuesta, e imprime una
@@ -156,8 +156,8 @@ Tiempo total:                    0,248 s
 ```
 
 Si ya has lanzado un ataque a mano y solo quieres medir el último (por ejemplo, con
-`docker compose exec attacker /opt/scripts/ssh_bruteforce_test.sh`), añade `--no-launch`:
-`scripts/measure_timings.sh 1 --no-launch`.
+`sudo docker compose exec attacker /opt/scripts/ssh_bruteforce_test.sh`), añade `--no-launch`:
+`sudo scripts/measure_timings.sh 1 --no-launch`.
 
 Qué alerta y qué respuesta esperar de cada uno está en
 [`docs/validation_plan.md`](docs/validation_plan.md#3-qué-se-espera-por-escenario), que también
@@ -169,8 +169,8 @@ Notas de repetibilidad:
   impide repetir el escenario 1 y bloquea SSH para los escenarios 2 y 3 mientras dure. Para
   quitar el bloqueo a mano en vez de esperar:
   ```bash
-  docker compose exec victim iptables -L WAZUH_AR -n            # ver la IP bloqueada
-  docker compose exec victim iptables -D WAZUH_AR -s <IP> -j DROP
+  sudo docker compose exec victim iptables -L WAZUH_AR -n            # ver la IP bloqueada
+  sudo docker compose exec victim iptables -D WAZUH_AR -s <IP> -j DROP
   ```
 - El escenario 2 solo detecta el **primer** cambio en `/etc/passwd`/`/etc/group` desde que
   arranca el agente: `useradd`/`userdel` reescriben esos ficheros con un patrón de *rename*
@@ -180,8 +180,8 @@ Notas de repetibilidad:
   `/etc/passwd`, así que si el `userdel` va después del reinicio, es él quien consume el único
   cambio detectable, no el ataque):
   ```bash
-  docker compose exec victim userdel -r backdoor01   # 1. limpiar el usuario, ANTES de reiniciar
-  docker compose restart victim                       # 2. reiniciar para rearmar el watch
+  sudo docker compose exec victim userdel -r backdoor01   # 1. limpiar el usuario, ANTES de reiniciar
+  sudo docker compose restart victim                       # 2. reiniciar para rearmar el watch
   # esperar ~15 s a que syscheckd termine su arranque antes de atacar de nuevo
   ```
   Detalle, investigación y verificación en `docs/validation_plan.md` §7.11.
@@ -191,7 +191,7 @@ Notas de repetibilidad:
   y la evidencia en disco se perdería.
 
 Las evidencias quedan en `./evidence/` y `./results/` (ambos en el host, no se borran con
-`docker compose down -v`).
+`sudo docker compose down -v`).
 
 ---
 
@@ -240,10 +240,10 @@ de este flujo se demuestra con el escenario 3.
 
 ```bash
 # Parada conservando volúmenes y evidencias
-docker compose down
+sudo docker compose down
 
 # Limpieza completa (elimina volúmenes con nombre: índices, configuración del agente, etc.)
-docker compose down -v
+sudo docker compose down -v
 ```
 
 `docker compose up -d` basta para volver a levantar el laboratorio después de cualquiera de
